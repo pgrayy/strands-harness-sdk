@@ -6,9 +6,10 @@ It allows MCP tools to be seamlessly integrated and used within the agent ecosys
 """
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Generator, Union
 
 from mcp.types import Tool as MCPTool
+from typing_extensions import override
 
 from ...types.tools import AgentTool, ToolResult, ToolSpec, ToolUse
 
@@ -73,13 +74,14 @@ class MCPAgentTool(AgentTool):
         """
         return "python"
 
-    def invoke(self, tool: ToolUse, *args: Any, **kwargs: dict[str, Any]) -> ToolResult:
+    @override
+    def stream(self, tool: ToolUse, *args: Any, **kwargs: Any) -> Generator[Union[ToolResult, Any], None, None]:
         """Invoke the MCP tool.
 
         This method delegates the tool invocation to the MCP server connection,
         passing the tool use ID, tool name, and input arguments.
         """
         logger.debug("invoking MCP tool '%s' with tool_use_id=%s", self.tool_name, tool["toolUseId"])
-        return self.mcp_client.call_tool_sync(
+        yield self.mcp_client.call_tool_sync(
             tool_use_id=tool["toolUseId"], name=self.tool_name, arguments=tool["input"]
         )

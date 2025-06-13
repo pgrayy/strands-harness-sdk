@@ -7,11 +7,11 @@ Python module-based tools, as well as utilities for validating tool uses and nor
 import inspect
 import logging
 import re
-from typing import Any, Callable, Dict, Optional, cast
+from typing import Any, Generator, Optional, Union, cast
 
-from typing_extensions import Unpack
+from typing_extensions import override
 
-from ..types.tools import AgentTool, ToolResult, ToolSpec, ToolUse
+from ..types.tools import AgentTool, ToolFunc, ToolResult, ToolSpec, ToolUse
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ def validate_tool_use_name(tool: ToolUse) -> None:
         raise InvalidToolUseNameException(message)
 
 
-def _normalize_property(prop_name: str, prop_def: Any) -> Dict[str, Any]:
+def _normalize_property(prop_name: str, prop_def: Any) -> dict[str, Any]:
     """Normalize a single property definition.
 
     Args:
@@ -86,7 +86,7 @@ def _normalize_property(prop_name: str, prop_def: Any) -> Dict[str, Any]:
     return normalized_prop
 
 
-def normalize_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Normalize a JSON schema to match expectations.
 
     This function recursively processes nested objects to preserve the complete schema structure.
@@ -152,11 +152,11 @@ class FunctionTool(AgentTool):
 
         return super().__new__(cls)
 
-    def __init__(self, func: Callable[[ToolUse, Unpack[Any]], ToolResult], tool_name: Optional[str] = None) -> None:
+    def __init__(self, tool_func: ToolFunc, tool_name: Optional[str] = None) -> None:
         """Initialize a function-based tool.
 
         Args:
-            func: The decorated function.
+            tool_func: The decorated function.
             tool_name: Optional tool name (defaults to function name).
 
         Raises:
@@ -164,19 +164,19 @@ class FunctionTool(AgentTool):
         """
         super().__init__()
 
-        self._func = func
+        self._tool_func = tool_func
 
         # Get TOOL_SPEC from the decorated function
-        if hasattr(func, "TOOL_SPEC") and isinstance(func.TOOL_SPEC, dict):
-            self._tool_spec = cast(ToolSpec, func.TOOL_SPEC)
+        if hasattr(tool_func, "TOOL_SPEC") and isinstance(tool_func.TOOL_SPEC, dict):
+            self._tool_spec = cast(ToolSpec, tool_func.TOOL_SPEC)
             # Use name from tool spec if available, otherwise use function name or passed tool_name
-            name = self._tool_spec.get("name", tool_name or func.__name__)
+            name = self._tool_spec.get("name", tool_name or tool_func.__name__)
             if isinstance(name, str):
                 self._name = name
             else:
                 raise ValueError(f"Tool name must be a string, got {type(name)}")
         else:
-            raise ValueError(f"Function {func.__name__} is not decorated with @tool")
+            raise ValueError(f"Function {tool_func.__name__} is not decorated with @tool")
 
     @property
     def tool_name(self) -> str:
@@ -214,7 +214,8 @@ class FunctionTool(AgentTool):
         """
         return True
 
-    def invoke(self, tool: ToolUse, *args: Any, **kwargs: Any) -> ToolResult:
+    @override
+    def stream(self, tool: ToolUse, *args: Any, **kwargs: Any) -> Generator[Union[ToolResult, Any], None, None]:
         """Execute the function with the given tool use request.
 
         Args:
@@ -222,37 +223,39 @@ class FunctionTool(AgentTool):
             *args: Additional positional arguments to pass to the function.
             **kwargs: Additional keyword arguments to pass to the function.
 
-        Returns:
-            A ToolResult containing the status and content from the function execution.
+        Yields:
+            Events of the tool invocation. The final event is always the tool result.
         """
-        # Make sure to pass through all kwargs, including 'agent' if provided
+        # Check if the function accepts agent as a keyword argument
+        sig = inspect.signature(self._tool_func)
+        if "agent" not in sig.parameters:
+            # Skip passing agent if function doesn't accept it
+            kwargs = {k: v for k, v in kwargs.items() if k != "agent"}
+
         try:
-            # Check if the function accepts agent as a keyword argument
-            sig = inspect.signature(self._func)
-            if "agent" in sig.parameters:
-                # Pass agent if function accepts it
-                return self._func(tool, **kwargs)
+            result = self._tool_func(tool, *args, **kwargs)
+            if inspect.isgenerator(result):
+                yield from result
             else:
-                # Skip passing agent if function doesn't accept it
-                filtered_kwargs = {k: v for k, v in kwargs.items() if k != "agent"}
-                return self._func(tool, **filtered_kwargs)
+                yield result
+
         except Exception as e:
-            return {
+            yield {
                 "toolUseId": tool.get("toolUseId", "unknown"),
                 "status": "error",
                 "content": [{"text": f"Error executing function: {str(e)}"}],
             }
 
     @property
-    def original_function(self) -> Callable:
+    def original_function(self) -> ToolFunc:
         """Get the original function (without wrapper).
 
         Returns:
             Undecorated function.
         """
-        if hasattr(self._func, "original_function"):
-            return cast(Callable, self._func.original_function)
-        return self._func
+        if hasattr(self._tool_func, "original_function"):
+            return cast(ToolFunc, self._tool_func.original_function)
+        return self._tool_func
 
     def get_display_properties(self) -> dict[str, str]:
         """Get properties to display in UI representations.
@@ -272,25 +275,23 @@ class PythonAgentTool(AgentTool):
     as SDK tools.
     """
 
-    _callback: Callable[[ToolUse, Any, dict[str, Any]], ToolResult]
+    _tool_func: ToolFunc
     _tool_name: str
     _tool_spec: ToolSpec
 
-    def __init__(
-        self, tool_name: str, tool_spec: ToolSpec, callback: Callable[[ToolUse, Any, dict[str, Any]], ToolResult]
-    ) -> None:
+    def __init__(self, tool_name: str, tool_spec: ToolSpec, tool_func: ToolFunc) -> None:
         """Initialize a Python-based tool.
 
         Args:
             tool_name: Unique identifier for the tool.
             tool_spec: Tool specification defining parameters and behavior.
-            callback: Python function to execute when the tool is invoked.
+            tool_func: Python function to execute when the tool is invoked.
         """
         super().__init__()
 
         self._tool_name = tool_name
         self._tool_spec = tool_spec
-        self._callback = callback
+        self._tool_func = tool_func
 
     @property
     def tool_name(self) -> str:
@@ -319,7 +320,8 @@ class PythonAgentTool(AgentTool):
         """
         return "python"
 
-    def invoke(self, tool: ToolUse, *args: Any, **kwargs: dict[str, Any]) -> ToolResult:
+    @override
+    def stream(self, tool: ToolUse, *args: Any, **kwargs: Any) -> Generator[Union[ToolResult, Any], None, None]:
         """Execute the Python function with the given tool use request.
 
         Args:
@@ -327,7 +329,11 @@ class PythonAgentTool(AgentTool):
             *args: Additional positional arguments to pass to the underlying callback function.
             **kwargs: Additional keyword arguments to pass to the underlying callback function.
 
-        Returns:
-            A ToolResult containing the status and content from the callback execution.
+        Yields:
+            Events of the tool invocation. The final event is always the tool result.
         """
-        return self._callback(tool, *args, **kwargs)
+        result = self._tool_func(tool, *args, **kwargs)
+        if inspect.isgenerator(result):
+            yield from result
+        else:
+            yield result

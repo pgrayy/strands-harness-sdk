@@ -34,7 +34,7 @@ from ..tools.watcher import ToolWatcher
 from ..types.content import ContentBlock, Message, Messages
 from ..types.exceptions import ContextWindowOverflowException
 from ..types.models import Model
-from ..types.tools import ToolConfig
+from ..types.tools import ToolConfig, ToolResult
 from ..types.traces import AttributeValue
 from .agent_result import AgentResult
 from .conversation_manager import (
@@ -182,7 +182,7 @@ class Agent:
                 }
 
                 # Execute the tool
-                tool_result = self._agent.tool_handler.process(
+                events = self._agent.tool_handler.process(
                     tool=tool_use,
                     model=self._agent.model,
                     system_prompt=self._agent.system_prompt,
@@ -194,6 +194,7 @@ class Agent:
                     agent=self._agent,
                     **handler_kwargs,
                 )
+                tool_result = list(events)[-1]
 
                 if record_direct_tool_call:
                     # Create a record of this tool execution in the message history
@@ -576,7 +577,7 @@ class Agent:
     def _record_tool_execution(
         self,
         tool: Dict[str, Any],
-        tool_result: Dict[str, Any],
+        tool_result: ToolResult,
         user_message_override: Optional[str],
         messages: List[Dict[str, Any]],
     ) -> None:

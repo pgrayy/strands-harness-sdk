@@ -775,6 +775,7 @@ def test_agent_init_with_no_model_or_model_id():
 
 def test_agent_tool_no_parameter_conflict(agent, tool_registry, mock_randint):
     agent.tool_handler = unittest.mock.Mock()
+    agent.tool_handler.process.return_value = [{}]
 
     @strands.tools.tool(name="system_prompter")
     def function(system_prompt: str) -> str:
@@ -805,6 +806,7 @@ def test_agent_tool_no_parameter_conflict(agent, tool_registry, mock_randint):
 
 def test_agent_tool_with_name_normalization(agent, tool_registry, mock_randint):
     agent.tool_handler = unittest.mock.Mock()
+    agent.tool_handler.process.return_value = [{}]
 
     tool_name = "system-prompter"
 

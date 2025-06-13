@@ -6,7 +6,7 @@ These types are modeled after the Bedrock API.
 """
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Coroutine, Generator, Literal, Optional, Protocol, Union
 
 from typing_extensions import TypedDict
 
@@ -90,7 +90,7 @@ class ToolResult(TypedDict):
         toolUseId: The unique identifier of the tool use request that produced this result.
     """
 
-    content: List[ToolResultContent]
+    content: list[ToolResultContent]
     status: ToolResultStatus
     toolUseId: str
 
@@ -122,9 +122,9 @@ class ToolChoiceTool(TypedDict):
 
 
 ToolChoice = Union[
-    Dict[Literal["auto"], ToolChoiceAuto],
-    Dict[Literal["any"], ToolChoiceAny],
-    Dict[Literal["tool"], ToolChoiceTool],
+    dict[Literal["auto"], ToolChoiceAuto],
+    dict[Literal["any"], ToolChoiceAny],
+    dict[Literal["tool"], ToolChoiceTool],
 ]
 """
 Configuration for how the model should choose tools.
@@ -143,8 +143,30 @@ class ToolConfig(TypedDict):
         toolChoice: Configuration for how the model should choose tools.
     """
 
-    tools: List[Tool]
+    tools: list[Tool]
     toolChoice: ToolChoice
+
+
+class ToolFunc(Protocol):
+    """Python based tool function."""
+
+    __name__: str
+
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> Union[
+        ToolResult,
+        Coroutine[Any, Any, ToolResult],
+        Generator[Union[ToolResult, Any], None, None],
+        AsyncGenerator[Union[ToolResult, Any], None],
+    ]:
+        """Function signature.
+
+        Returns:
+            If a generator, yields invocation events with the last being a tool result. Non-generators return a tool
+            result directly.
+        """
+        ...
 
 
 class AgentTool(ABC):
@@ -195,7 +217,7 @@ class AgentTool(ABC):
 
     @abstractmethod
     # pragma: no cover
-    def invoke(self, tool: ToolUse, *args: Any, **kwargs: dict[str, Any]) -> ToolResult:
+    def stream(self, tool: ToolUse, *args: Any, **kwargs: Any) -> Generator[Union[ToolResult, Any], None, None]:
         """Execute the tool's functionality with the given tool use request.
 
         Args:
@@ -203,8 +225,8 @@ class AgentTool(ABC):
             *args: Positional arguments to pass to the tool.
             **kwargs: Keyword arguments to pass to the tool.
 
-        Returns:
-            The result of the tool execution.
+        Yields:
+            Events of the tool invocation. The final event is always the tool result.
         """
         pass
 
@@ -272,7 +294,7 @@ class ToolHandler(ABC):
         tool_config: ToolConfig,
         callback_handler: Any,
         **kwargs: Any,
-    ) -> ToolResult:
+    ) -> Generator[Union[ToolResult, Any], None, None]:
         """Process a tool use request and execute the tool.
 
         Args:
@@ -284,7 +306,7 @@ class ToolHandler(ABC):
             callback_handler: Callback for processing events as they happen.
             **kwargs: Additional context-specific arguments.
 
-        Returns:
-            The result of the tool execution.
+        Yields:
+            Events of the tool invocation. The final event is always the tool result.
         """
         ...

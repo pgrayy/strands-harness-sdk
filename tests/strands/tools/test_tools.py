@@ -497,14 +497,16 @@ def test_get_display_properties(tool):
     assert tru_properties == exp_properties
 
 
-def test_invoke(tool):
-    tru_output = tool.invoke({"input": {"a": 2}})
-    exp_output = {"toolUseId": "unknown", "status": "success", "content": [{"text": "2"}]}
+def test_stream(tool):
+    stream = tool.stream({"input": {"a": 2}})
 
-    assert tru_output == exp_output
+    tru_result = list(stream)[-1]
+    exp_result = {"toolUseId": "unknown", "status": "success", "content": [{"text": "2"}]}
+
+    assert tru_result == exp_result
 
 
-def test_invoke_with_agent():
+def test_stream_with_agent():
     @strands.tools.tool
     def identity(a: int, agent: dict = None):
         return a, agent
@@ -513,14 +515,15 @@ def test_invoke_with_agent():
     # FunctionTool is a pass through for AgentTool instances until we remove it in a future release (#258)
     assert tool == identity
 
-    exp_output = {"toolUseId": "unknown", "status": "success", "content": [{"text": "(2, {'state': 1})"}]}
+    stream = tool.stream({"input": {"a": 2}}, agent={"state": 1})
 
-    tru_output = tool.invoke({"input": {"a": 2}}, agent={"state": 1})
+    tru_result = list(stream)[-1]
+    exp_result = {"toolUseId": "unknown", "status": "success", "content": [{"text": "(2, {'state': 1})"}]}
 
-    assert tru_output == exp_output
+    assert tru_result == exp_result
 
 
-def test_invoke_exception():
+def test_stream_exception():
     def identity(a: int):
         return a
 
@@ -528,22 +531,24 @@ def test_invoke_exception():
 
     tool = FunctionTool(identity, tool_name="identity")
 
-    tru_output = tool.invoke({}, invalid=1)
-    exp_output = {
+    stream = tool.stream({}, invalid=1)
+
+    tru_result = list(stream)[-1]
+    exp_result = {
         "toolUseId": "unknown",
         "status": "error",
         "content": [
             {
                 "text": (
                     "Error executing function: "
-                    "test_invoke_exception.<locals>.identity() "
+                    "test_stream_exception.<locals>.identity() "
                     "got an unexpected keyword argument 'invalid'"
                 )
             }
         ],
     }
 
-    assert tru_output == exp_output
+    assert tru_result == exp_result
 
 
 # Tests from test_python_agent_tool.py
@@ -566,7 +571,7 @@ def python_tool():
                 },
             },
         },
-        callback=identity,
+        tool_func=identity,
     )
 
 
@@ -602,8 +607,10 @@ def test_python_tool_type(python_tool):
     assert tru_type == exp_type
 
 
-def test_python_invoke(python_tool):
-    tru_output = python_tool.invoke({"tool_use": 1}, a=2)
-    exp_output = ({"tool_use": 1}, 2)
+def test_python_stream(python_tool):
+    stream = python_tool.stream({"tool_use": 1}, a=2)
 
-    assert tru_output == exp_output
+    tru_result = list(stream)[-1]
+    exp_result = ({"tool_use": 1}, 2)
+
+    assert tru_result == exp_result

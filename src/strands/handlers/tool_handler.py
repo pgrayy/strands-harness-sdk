@@ -1,7 +1,7 @@
 """This module provides handlers for managing tool invocations."""
 
 import logging
-from typing import Any, List, Optional
+from typing import Any, Generator, Optional, Union
 
 from ..tools.registry import ToolRegistry
 from ..types.models import Model
@@ -49,11 +49,11 @@ class AgentToolHandler(ToolHandler):
         *,
         model: Model,
         system_prompt: Optional[str],
-        messages: List[Any],
+        messages: list[Any],
         tool_config: Any,
         callback_handler: Any,
         **kwargs: Any,
-    ) -> Any:
+    ) -> Generator[Union[ToolResult, Any], None, None]:
         """Process a tool invocation.
 
         Looks up the tool in the registry and invokes it with the provided parameters.
@@ -67,10 +67,10 @@ class AgentToolHandler(ToolHandler):
             callback_handler: Callback for processing events as they happen.
             **kwargs: Additional keyword arguments passed to the tool.
 
-        Returns:
-            The result of the tool invocation, or an error response if the tool fails or is not found.
+        Yields:
+            Events of the tool invocation. The final event is always the tool result.
         """
-        logger.debug("tool=<%s> | invoking", tool)
+        logger.debug("tool=<%s> | streaming", tool)
         tool_use_id = tool["toolUseId"]
         tool_name = tool["name"]
 
@@ -86,11 +86,13 @@ class AgentToolHandler(ToolHandler):
                     tool_name,
                     list(self.tool_registry.registry.keys()),
                 )
-                return {
+                yield {
                     "toolUseId": tool_use_id,
                     "status": "error",
                     "content": [{"text": f"Unknown tool: {tool_name}"}],
                 }
+                return
+
             # Add standard arguments to kwargs for Python tools
             kwargs.update(
                 {
@@ -102,11 +104,11 @@ class AgentToolHandler(ToolHandler):
                 }
             )
 
-            return tool_func.invoke(tool, **kwargs)
+            yield from tool_func.stream(tool, **kwargs)
 
         except Exception as e:
             logger.exception("tool_name=<%s> | failed to process tool", tool_name)
-            return {
+            yield {
                 "toolUseId": tool_use_id,
                 "status": "error",
                 "content": [{"text": f"Error: {str(e)}"}],

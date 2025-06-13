@@ -45,7 +45,7 @@ def test_preprocess(tool_handler, tool_use_identity):
 
 
 def test_process(tool_handler, tool_use_identity):
-    tru_result = tool_handler.process(
+    stream = tool_handler.process(
         tool_use_identity,
         model=unittest.mock.Mock(),
         system_prompt="p1",
@@ -53,13 +53,15 @@ def test_process(tool_handler, tool_use_identity):
         tool_config={},
         callback_handler=unittest.mock.Mock(),
     )
+
+    tru_result = list(stream)[-1]
     exp_result = {"toolUseId": "identity", "status": "success", "content": [{"text": "1"}]}
 
     assert tru_result == exp_result
 
 
 def test_process_missing_tool(tool_handler):
-    tru_result = tool_handler.process(
+    stream = tool_handler.process(
         tool={"toolUseId": "missing", "name": "missing", "input": {}},
         model=unittest.mock.Mock(),
         system_prompt="p1",
@@ -67,6 +69,8 @@ def test_process_missing_tool(tool_handler):
         tool_config={},
         callback_handler=unittest.mock.Mock(),
     )
+
+    tru_result = list(stream)[-1]
     exp_result = {
         "toolUseId": "missing",
         "status": "error",

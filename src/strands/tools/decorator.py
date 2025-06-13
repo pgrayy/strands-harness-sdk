@@ -46,7 +46,7 @@ import logging
 from typing import (
     Any,
     Callable,
-    Dict,
+    Generator,
     Generic,
     Optional,
     ParamSpec,
@@ -119,7 +119,7 @@ class FunctionToolMetadata:
         Returns:
             A Pydantic BaseModel class customized for the function's parameters.
         """
-        field_definitions: Dict[str, Any] = {}
+        field_definitions: dict[str, Any] = {}
 
         for name, param in self.signature.parameters.items():
             # Skip special parameters
@@ -179,7 +179,7 @@ class FunctionToolMetadata:
 
         return tool_spec
 
-    def _clean_pydantic_schema(self, schema: Dict[str, Any]) -> None:
+    def _clean_pydantic_schema(self, schema: dict[str, Any]) -> None:
         """Clean up Pydantic schema to match Strands' expected format.
 
         Pydantic's JSON schema output includes several elements that aren't needed for Strands Agent tools and could
@@ -227,7 +227,7 @@ class FunctionToolMetadata:
                     if key in prop_schema:
                         del prop_schema[key]
 
-    def validate_input(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+    def validate_input(self, input_data: dict[str, Any]) -> dict[str, Any]:
         """Validate input data using the Pydantic model.
 
         This method ensures that the input data meets the expected schema before it's passed to the actual function. It
@@ -353,12 +353,15 @@ class DecoratedFunctionTool(AgentTool, Generic[P, R]):
             # This block is only for backwards compatability so we cast as any for now
             logger.warning(
                 "issue=<%s> | "
-                "passing tool use into a function instead of using .invoke will be removed in a future release",
+                "passing tool use into a function instead of using .stream will be removed in a future release",
                 "https://github.com/strands-agents/sdk-python/pull/258",
             )
             tool_use = cast(Any, args[0])
 
-            return cast(R, self.invoke(tool_use, **kwargs))
+            events = self.stream(tool_use, **kwargs)
+            result = list(events)[-1]
+
+            return cast(R, result)
 
         return self.original_function(*args, **kwargs)
 
@@ -389,7 +392,8 @@ class DecoratedFunctionTool(AgentTool, Generic[P, R]):
         """
         return "function"
 
-    def invoke(self, tool: ToolUse, *args: Any, **kwargs: dict[str, Any]) -> ToolResult:
+    @override
+    def stream(self, tool: ToolUse, *args: Any, **kwargs: Any) -> Generator[Union[ToolResult, Any], None, None]:
         """Invoke the tool with a tool use specification.
 
         This method handles tool use invocations from a Strands Agent. It validates the input,
@@ -408,8 +412,8 @@ class DecoratedFunctionTool(AgentTool, Generic[P, R]):
             *args: Additional positional arguments (not typically used).
             **kwargs: Additional keyword arguments, may include 'agent' reference.
 
-        Returns:
-            A standardized tool result dictionary with status and content.
+        Yields:
+            Events of the tool invocation. The final event is always the tool result.
         """
         # This is a tool use call - process accordingly
         tool_use = tool
@@ -424,27 +428,35 @@ class DecoratedFunctionTool(AgentTool, Generic[P, R]):
             if "agent" in kwargs and "agent" in self._metadata.signature.parameters:
                 validated_input["agent"] = kwargs.get("agent")
 
+            # User will need to piece together a tool result themselves if using a generator
+            if inspect.isgeneratorfunction(self.original_function):
+                validated_input["tool_use_id"] = tool_use_id
+
             # We get "too few arguments here" but because that's because fof the way we're calling it
             result = self.original_function(**validated_input)  # type: ignore
+            if inspect.isgenerator(result):
+                yield from result
+                return
 
             # FORMAT THE RESULT for Strands Agent
             if isinstance(result, dict) and "status" in result and "content" in result:
                 # Result is already in the expected format, just add toolUseId
                 result["toolUseId"] = tool_use_id
-                return cast(ToolResult, result)
-            else:
-                # Wrap any other return value in the standard format
-                # Always include at least one content item for consistency
-                return {
-                    "toolUseId": tool_use_id,
-                    "status": "success",
-                    "content": [{"text": str(result)}],
-                }
+                yield result
+                return
+
+            # Wrap any other return value in the standard format
+            # Always include at least one content item for consistency
+            yield {
+                "toolUseId": tool_use_id,
+                "status": "success",
+                "content": [{"text": str(result)}],
+            }
 
         except ValueError as e:
             # Special handling for validation errors
             error_msg = str(e)
-            return {
+            yield {
                 "toolUseId": tool_use_id,
                 "status": "error",
                 "content": [{"text": f"Error: {error_msg}"}],
@@ -453,7 +465,7 @@ class DecoratedFunctionTool(AgentTool, Generic[P, R]):
             # Return error result with exception details for any other error
             error_type = type(e).__name__
             error_msg = str(e)
-            return {
+            yield {
                 "toolUseId": tool_use_id,
                 "status": "error",
                 "content": [{"text": f"Error: {error_type} - {error_msg}"}],

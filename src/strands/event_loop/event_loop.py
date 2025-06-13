@@ -12,7 +12,7 @@ import logging
 import time
 import uuid
 from functools import partial
-from typing import Any, Callable, Generator, Optional, cast
+from typing import Any, Callable, Generator, Optional
 
 from ..telemetry.metrics import EventLoopMetrics, Trace
 from ..telemetry.tracer import get_tracer
@@ -352,11 +352,10 @@ def _handle_tool_execution(
         **kwargs,
     )
 
-    run_tools(
+    yield from run_tools(
         handler=tool_handler_process,
         tool_uses=tool_uses,
         event_loop_metrics=event_loop_metrics,
-        request_state=cast(Any, kwargs["request_state"]),
         invalid_tool_use_ids=invalid_tool_use_ids,
         tool_results=tool_results,
         cycle_trace=cycle_trace,

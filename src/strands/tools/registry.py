@@ -349,7 +349,7 @@ class ToolRegistry:
             new_tool = PythonAgentTool(
                 tool_name=tool_name,
                 tool_spec=module.TOOL_SPEC,
-                callback=tool_function,
+                tool_func=tool_function,
             )
 
             # Register the tool
@@ -433,7 +433,7 @@ class ToolRegistry:
                                 tool = PythonAgentTool(
                                     tool_name=tool_name,
                                     tool_spec=tool_spec,
-                                    callback=tool_function,
+                                    tool_func=tool_function,
                                 )
                                 self.register_tool(tool)
                                 successful_loads += 1
@@ -465,7 +465,7 @@ class ToolRegistry:
                             tool = PythonAgentTool(
                                 tool_name=tool_name,
                                 tool_spec=tool_spec,
-                                callback=tool_function,
+                                tool_func=tool_function,
                             )
                             self.register_tool(tool)
                             successful_loads += 1
