@@ -334,86 +334,122 @@ async def test_bidi_agent_start_stop_lifecycle(agent):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("text_input", "audio_input", "image_input"),
-    [
-        (
-            TextBlock("Hello"),
-            AudioBlock(format="pcm", source={"bytes": b"audio"}),
-            ImageBlock(format="jpeg", source={"bytes": b"image"}),
-        ),
-        (
-            {"text": "Hello"},
-            {"audio": {"format": "pcm", "source": {"bytes": b"audio"}}},
-            {"image": {"format": "jpeg", "source": {"bytes": b"image"}}},
-        ),
-    ],
-    ids=["objects", "dictionaries"],
-)
-async def test_bidi_agent_send_with_input_types(agent, text_input, audio_input, image_input):
-    """Test sending various input types through agent.send()."""
+@pytest.mark.parametrize("input_data", ["Hello", {"text": "Hello"}], ids=["string", "dictionary"])
+async def test_send_normalizes_text(agent, input_data):
+    """Text inputs become text blocks and user messages."""
     await agent.start()
-    agent.model.send = unittest.mock.AsyncMock(wraps=agent.model.send)
+    agent.model.send = unittest.mock.AsyncMock()
 
-    # Test a text content block
-    await agent.send(text_input)
-    if isinstance(text_input, TextBlock):
-        assert agent.model.send.call_args.args[0] is text_input
-    assert len(agent.messages) == 1
-    assert agent.messages[0]["content"][0]["text"] == "Hello"
+    await agent.send(input_data)
 
-    # Test string input (shorthand)
-    await agent.send("World")
-    assert len(agent.messages) == 2
-    assert agent.messages[1]["content"][0]["text"] == "World"
-
-    # Media input doesn't add to messages.
-    await agent.send(audio_input)
-    if isinstance(audio_input, AudioBlock):
-        assert agent.model.send.call_args.args[0] is audio_input
-    else:
-        assert agent.model.send.call_args.args[0].source is audio_input["audio"]["source"]
-    await agent.send(image_input)
-    if isinstance(image_input, ImageBlock):
-        assert agent.model.send.call_args.args[0] is image_input
-    else:
-        assert agent.model.send.call_args.args[0].source is image_input["image"]["source"]
-    assert len(agent.messages) == 2
-
-    tru_calls = agent.model.send.await_args_list
-    exp_calls = [
-        unittest.mock.call(TextBlock("Hello")),
-        unittest.mock.call(TextBlock("World")),
-        unittest.mock.call(AudioBlock(format="pcm", source={"bytes": b"audio"})),
-        unittest.mock.call(ImageBlock(format="jpeg", source={"bytes": b"image"})),
-    ]
-    assert tru_calls == exp_calls
-
-    # Test concurrent sends
-    sends = [agent.send({"text": f"Message {i}"}) for i in range(3)]
-    await asyncio.gather(*sends)
-    assert len(agent.messages) == 5
+    agent.model.send.assert_awaited_once_with(TextBlock("Hello"))
+    tru_messages = agent.messages
+    exp_messages = [{"role": "user", "content": [{"text": "Hello"}], "tracking_id": unittest.mock.ANY}]
+    assert tru_messages == exp_messages
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "input_data",
+    ("content_key", "block_type", "media_format"),
+    [("audio", AudioBlock, "pcm"), ("image", ImageBlock, "jpeg")],
+    ids=["audio", "image"],
+)
+async def test_send_normalizes_media(agent, content_key, block_type, media_format):
+    """Media dictionaries retain their source without adding history."""
+    await agent.start()
+    agent.model.send = unittest.mock.AsyncMock()
+    source = {"bytes": b"\x00\xff"}
+
+    await agent.send({content_key: {"format": media_format, "source": source}})
+
+    exp_content = block_type(format=media_format, source=source)
+    agent.model.send.assert_awaited_once_with(exp_content)
+    assert agent.model.send.await_args.args[0].source is source
+    assert agent.messages == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content",
     [
-        {},
-        [],
-        {"document": {"format": "txt", "name": "test", "source": {"bytes": b"test"}}},
-        {"text": "Hello", "image": {"format": "jpeg", "source": {"bytes": b"image"}}},
-        [{"text": "Hello"}],
-        ToolResultBlock(tool_use_id="call-1", status="success", content=[{"text": "Done"}]),
-        {"toolResult": {"toolUseId": "call-1", "status": "success", "content": [{"text": "Done"}]}},
+        TextBlock("Hello"),
+        AudioBlock(format="pcm", source={"bytes": b"audio"}),
+        ImageBlock(format="jpeg", source={"bytes": b"image"}),
+    ],
+    ids=["text", "audio", "image"],
+)
+async def test_send_preserves_block_identity(agent, content):
+    """Existing block objects are passed through by reference."""
+    await agent.start()
+    agent.model.send = unittest.mock.AsyncMock()
+
+    await agent.send(content)
+
+    agent.model.send.assert_awaited_once_with(content)
+    assert agent.model.send.await_args.args[0] is content
+
+
+@pytest.mark.asyncio
+async def test_send_concurrent_text(agent):
+    """Concurrent sends each reach the model and add one user message."""
+    await agent.start()
+    agent.model.send = unittest.mock.AsyncMock()
+    texts = ["Hello", "World", "Again"]
+
+    await asyncio.gather(*(agent.send({"text": text}) for text in texts))
+
+    tru_calls = agent.model.send.await_args_list
+    exp_calls = [unittest.mock.call(TextBlock(text)) for text in texts]
+    assert tru_calls == exp_calls
+    tru_messages = agent.messages
+    exp_messages = [{"role": "user", "content": [{"text": text}], "tracking_id": unittest.mock.ANY} for text in texts]
+    assert tru_messages == exp_messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("input_data", "error_type"),
+    [
+        (None, TypeError),
+        (123, TypeError),
+        ([], TypeError),
+        ([{"text": "Hello"}], TypeError),
+        (ToolResultBlock(tool_use_id="call-1", status="success", content=[{"text": "Done"}]), TypeError),
+        ({"audio": None}, TypeError),
+        ({"image": b"image"}, TypeError),
+        ({}, ValueError),
+        ({"document": {"format": "txt", "name": "test", "source": {"bytes": b"test"}}}, ValueError),
+        ({"text": "Hello", "image": {"format": "jpeg", "source": {"bytes": b"image"}}}, ValueError),
+        ({"toolResult": {"toolUseId": "call-1", "status": "success", "content": [{"text": "Done"}]}}, ValueError),
+        ({"audio": {"format": "pcm"}}, TypeError),
+        ({"audio": {"format": "pcm", "source": {"bytes": b"audio"}, "extra": True}}, TypeError),
+        ({"image": {"format": "jpeg"}}, TypeError),
+        ({"image": {"format": "jpeg", "source": {"bytes": b"image"}, "extra": True}}, TypeError),
     ],
 )
-async def test_bidi_agent_send_rejects_unsupported_content(agent, input_data):
-    """Test that agent.send rejects unsupported content block shapes."""
+async def test_send_rejects_invalid_input(agent, input_data, error_type):
+    """Invalid input types and malformed content fail before reaching the model."""
     await agent.start()
+    agent.model.send = unittest.mock.AsyncMock()
 
-    with pytest.raises(ValueError, match="invalid input"):
+    with pytest.raises(error_type):
         await agent.send(input_data)
+
+    agent.model.send.assert_not_awaited()
+    assert agent.messages == []
+
+
+@pytest.mark.asyncio
+async def test_send_preserves_model_type_error(agent):
+    """Model errors pass through without being reclassified as invalid input."""
+    await agent.start()
+    error = TypeError("model failure")
+    agent.model.send = unittest.mock.AsyncMock(side_effect=error)
+
+    with pytest.raises(TypeError) as exc_info:
+        await agent.send({"audio": {"format": "pcm", "source": {"bytes": b"audio"}}})
+
+    assert exc_info.value is error
 
 
 @pytest.mark.asyncio

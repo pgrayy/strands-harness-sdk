@@ -545,8 +545,8 @@ class BedrockNovaSonicModel(BidiModel, AudioCapable):
             )
             await self._send_tool_result(content)
         else:
-            logger.error("content=<%s> | unsupported content block", content)
-            raise ValueError(f"content={content} | content not supported")
+            logger.error("content_type=<%s> | unsupported content type", type(content))
+            raise ValueError(f"content_type={type(content)} | content not supported")
 
     async def _start_audio_connection(self) -> None:
         """Internal: Start audio input connection (call once before sending audio chunks)."""

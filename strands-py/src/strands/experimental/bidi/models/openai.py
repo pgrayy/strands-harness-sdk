@@ -726,7 +726,7 @@ class OpenAIRealtimeModel(BidiModel, AudioCapable):
         elif isinstance(content, ToolResultBlock):
             await self._send_tool_result(content)
         else:
-            raise ValueError(f"content={content} | content not supported")
+            raise ValueError(f"content_type={type(content)} | content not supported")
 
     async def _send_audio_content(self, audio_input: AudioBlock) -> None:
         """Internal: Send audio content to OpenAI for processing."""

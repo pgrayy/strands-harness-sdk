@@ -320,7 +320,8 @@ class BidiAgent(LocalAgent):
 
         Raises:
             RuntimeError: If start has not been called.
-            ValueError: If invalid input type.
+            TypeError: If the input has an unsupported type or invalid content block arguments.
+            ValueError: If the input dictionary does not contain exactly one text, audio, or image key.
 
         Example:
             await agent.send("Hello")
@@ -345,7 +346,7 @@ class BidiAgent(LocalAgent):
             else:
                 raise ValueError("invalid input | content block must contain exactly one of text, audio, or image")
         elif not isinstance(input_data, (TextBlock, AudioBlock, ImageBlock)):
-            raise ValueError("invalid input | must be str, TextBlock, AudioBlock, ImageBlock, or BidiContentBlockData")
+            raise TypeError("invalid input | must be str, TextBlock, AudioBlock, ImageBlock, or BidiContentBlockData")
 
         await self._loop.send(input_data)
 
