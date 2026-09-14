@@ -11,15 +11,15 @@ from strands import LocalAgent, ToolContext, tool
 from strands.experimental.bidi.agent.agent import BidiAgent
 from strands.experimental.bidi.models.model import BidiModel
 from strands.experimental.bidi.types.events import (
-    BidiAudioInputEvent,
     BidiAudioStreamEvent,
     BidiConnectionCloseEvent,
     BidiConnectionStartEvent,
-    BidiTextInputEvent,
     BidiTranscriptStreamEvent,
 )
 from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent
-from strands.types.content import SystemContentBlock
+from strands.types.content import SystemContentBlock, TextBlock
+from strands.types.media import AudioBlock, ImageBlock
+from strands.types.tools import ToolResultBlock
 
 
 class MockBidiModel(BidiModel):
@@ -334,13 +334,31 @@ async def test_bidi_agent_start_stop_lifecycle(agent):
 
 
 @pytest.mark.asyncio
-async def test_bidi_agent_send_with_input_types(agent):
+@pytest.mark.parametrize(
+    ("text_input", "audio_input", "image_input"),
+    [
+        (
+            TextBlock("Hello"),
+            AudioBlock(format="pcm", source={"bytes": b"audio"}),
+            ImageBlock(format="jpeg", source={"bytes": b"image"}),
+        ),
+        (
+            {"text": "Hello"},
+            {"audio": {"format": "pcm", "source": {"bytes": b"audio"}}},
+            {"image": {"format": "jpeg", "source": {"bytes": b"image"}}},
+        ),
+    ],
+    ids=["objects", "dictionaries"],
+)
+async def test_bidi_agent_send_with_input_types(agent, text_input, audio_input, image_input):
     """Test sending various input types through agent.send()."""
     await agent.start()
+    agent.model.send = unittest.mock.AsyncMock(wraps=agent.model.send)
 
-    # Test text input with TypedEvent
-    text_input = BidiTextInputEvent(text="Hello", role="user")
+    # Test a text content block
     await agent.send(text_input)
+    if isinstance(text_input, TextBlock):
+        assert agent.model.send.call_args.args[0] is text_input
     assert len(agent.messages) == 1
     assert agent.messages[0]["content"][0]["text"] == "Hello"
 
@@ -349,20 +367,53 @@ async def test_bidi_agent_send_with_input_types(agent):
     assert len(agent.messages) == 2
     assert agent.messages[1]["content"][0]["text"] == "World"
 
-    # Test audio input (doesn't add to messages)
-    audio_input = BidiAudioInputEvent(
-        audio="dGVzdA==",  # base64 "test"
-        format="pcm",
-        sample_rate=16000,
-        channels=1,
-    )
+    # Media input doesn't add to messages.
     await agent.send(audio_input)
-    assert len(agent.messages) == 2  # Still 2, audio doesn't add
+    if isinstance(audio_input, AudioBlock):
+        assert agent.model.send.call_args.args[0] is audio_input
+    else:
+        assert agent.model.send.call_args.args[0].source is audio_input["audio"]["source"]
+    await agent.send(image_input)
+    if isinstance(image_input, ImageBlock):
+        assert agent.model.send.call_args.args[0] is image_input
+    else:
+        assert agent.model.send.call_args.args[0].source is image_input["image"]["source"]
+    assert len(agent.messages) == 2
+
+    tru_calls = agent.model.send.await_args_list
+    exp_calls = [
+        unittest.mock.call(TextBlock("Hello")),
+        unittest.mock.call(TextBlock("World")),
+        unittest.mock.call(AudioBlock(format="pcm", source={"bytes": b"audio"})),
+        unittest.mock.call(ImageBlock(format="jpeg", source={"bytes": b"image"})),
+    ]
+    assert tru_calls == exp_calls
 
     # Test concurrent sends
-    sends = [agent.send(BidiTextInputEvent(text=f"Message {i}", role="user")) for i in range(3)]
+    sends = [agent.send({"text": f"Message {i}"}) for i in range(3)]
     await asyncio.gather(*sends)
-    assert len(agent.messages) == 5  # 2 + 3 new messages
+    assert len(agent.messages) == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "input_data",
+    [
+        {},
+        [],
+        {"document": {"format": "txt", "name": "test", "source": {"bytes": b"test"}}},
+        {"text": "Hello", "image": {"format": "jpeg", "source": {"bytes": b"image"}}},
+        [{"text": "Hello"}],
+        ToolResultBlock(tool_use_id="call-1", status="success", content=[{"text": "Done"}]),
+        {"toolResult": {"toolUseId": "call-1", "status": "success", "content": [{"text": "Done"}]}},
+    ],
+)
+async def test_bidi_agent_send_rejects_unsupported_content(agent, input_data):
+    """Test that agent.send rejects unsupported content block shapes."""
+    await agent.start()
+
+    with pytest.raises(ValueError, match="invalid input"):
+        await agent.send(input_data)
 
 
 @pytest.mark.asyncio
@@ -426,7 +477,7 @@ async def test_bidi_agent_send_receive_error_before_start(agent):
     """Test error handling in various scenarios."""
     # Test send before start
     with pytest.raises(RuntimeError, match="call start before"):
-        await agent.send(BidiTextInputEvent(text="Hello", role="user"))
+        await agent.send({"text": "Hello"})
 
     # Test receive before start
     with pytest.raises(RuntimeError, match="call start before"):
@@ -437,7 +488,7 @@ async def test_bidi_agent_send_receive_error_before_start(agent):
     await agent.start()
     await agent.stop()
     with pytest.raises(RuntimeError, match="call start before"):
-        await agent.send(BidiTextInputEvent(text="Hello", role="user"))
+        await agent.send({"text": "Hello"})
 
     # Test receive after stop
     with pytest.raises(RuntimeError, match="call start before"):
@@ -485,7 +536,7 @@ async def test_bidi_agent_state_consistency(agent):
     connection_id = agent.model._connection_id
 
     # Send operations shouldn't change connection state
-    await agent.send(BidiTextInputEvent(text="Hello", role="user"))
+    await agent.send({"text": "Hello"})
     assert agent._started
     assert agent.model._connection_id == connection_id
 
