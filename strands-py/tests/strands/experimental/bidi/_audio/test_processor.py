@@ -38,19 +38,20 @@ def test_processor_construction_respects_echo_cancellation_flag(mock_audio_proce
     assert mock_audio_processor.call_args.kwargs["echo_cancellation"] is False
 
 
-def test_ec_off_processes_capture_with_none_reference(mock_audio_processor):
+@pytest.mark.parametrize("output_rate", [None, 16000])
+def test_ec_off_processes_capture_with_none_reference(mock_audio_processor, output_rate):
     frame = np.ones(160, dtype=np.int16) * 1000
     cleaned = np.zeros(160, dtype=np.int16)
 
     processor = mock_audio_processor.return_value
     processor.process.return_value = cleaned
 
-    proc = _create_processor(echo_cancellation=False)
+    proc = _create_processor(echo_cancellation=False, output_rate=output_rate)
     proc.process(frame.tobytes())
 
-    assert len(processor.process.call_args.args) == 2
-    np.testing.assert_array_equal(processor.process.call_args.args[0], frame)
-    assert processor.process.call_args.args[1] is None
+    near_frame, reference_frame = processor.process.call_args.args
+    np.testing.assert_array_equal(near_frame, frame)
+    assert reference_frame is None
 
 
 def test_process_empty_input_returns_empty(mock_audio_processor):
@@ -85,6 +86,22 @@ def test_processor_construction_builds_audio_processor_with_config(mock_audio_pr
         auto_gain_control=True,
         stream_delay_ms=20,
     )
+
+
+@pytest.mark.parametrize("num_channels", [0, 2])
+@pytest.mark.parametrize("echo_cancellation", [False, True])
+def test_processor_start_rejects_non_mono_audio(mock_audio_processor, num_channels, echo_cancellation):
+    with pytest.raises(ValueError, match="Audio processing currently supports only mono audio"):
+        _create_processor(num_channels=num_channels, echo_cancellation=echo_cancellation)
+
+    mock_audio_processor.assert_not_called()
+
+
+def test_processor_start_requires_output_rate_for_echo_cancellation(mock_audio_processor):
+    with pytest.raises(ValueError, match="Echo cancellation requires output_rate"):
+        _create_processor(output_rate=None)
+
+    mock_audio_processor.assert_not_called()
 
 
 @pytest.mark.parametrize("rate", [8000, 16000, 24000, 44100, 48000, 96000, 384000])
@@ -231,7 +248,7 @@ def test_real_library_echo_cancellation_off_still_processes():
     # Echo cancellation off: no reference is used (far=None) and the frame is still processed by noise
     # suppression / AGC. Assert the output actually differs from the input, so the test fails if the config
     # were ignored (a length-only check would pass even on an identity pass-through).
-    proc = _create_processor(echo_cancellation=False)
+    proc = _create_processor(echo_cancellation=False, output_rate=None)
 
     rng = np.random.default_rng(0)
     out = np.array([], dtype=np.int16)
