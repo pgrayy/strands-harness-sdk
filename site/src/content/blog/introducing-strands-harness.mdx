@@ -1,11 +1,14 @@
 ---
 title: "Introducing Strands harness: frontier performance with 28% lower token cost"
-date: 2026-09-21
+date: 2026-09-15
 description: "Strands harness is a fully assembled, customizable, state-of-the-art agent you run locally or deploy anywhere."
 authors:
   - arron-bailiss
   - tim-moreton
   - albert-zhao
+  - ariel-nabavian
+  - murat-kaan-meral
+  - gautam-sirdeshmukh
 tags:
   - Announcement
   - Strands harness
@@ -13,6 +16,9 @@ tags:
   - Use Cases
 draft: false
 ---
+
+import strandsCliExportDemo from './resources/strands-harness/strands-cli-export-demo.mp4'
+import strandsDesktopDemo from './resources/strands-harness/strands-desktop-demo.mp4'
 
 We noticed builders often wished their Claude Code or Codex setup could run in the cloud because locally their agent idea just "worked" with those harnesses.
 
@@ -186,9 +192,33 @@ After installing Strands harness, we include a skills file for your coding agent
 
 We also have the Strands CLI that allows you to prototype your agent in plain English. Wire up your model provider of choice, then add prompts and tools to watch your agent come to life. Afterwards, you can run `/export` in the Strands CLI to get a copy of the code in either TypeScript or Python, a very convenient way to keep iterating on Strands harness with your preferred coding agent.
 
+<video
+  src={strandsCliExportDemo}
+  controls
+  loop
+  muted
+  playsInline
+  width="100%"
+>
+  Your browser does not support the video tag.
+</video>
+
+Here we ask the Strands harness agent to "add the Playwright MCP" and then measure latency when loading a video on a blog post. After seeing the MCP tools accurately work, we simply run `/export` to get the Strands harness code. You can see the Playwright MCP got added to the boilerplate, making it easy to iterate with a coding agent or adding config to deploy.
+
 ## What you can build from Strands harness
 
 The Strands CLI is actually built on top of Strands harness. We unlocked a bunch of ambitious ideas because of how easy it is to prototype any agent. Recently our engineer, Gautam Sirdeshmukh, inspired by agent platforms like Grokbot and Muse, built a desktop app that kicks off Strands harness remotely.
+
+<video
+  src={strandsDesktopDemo}
+  controls
+  loop
+  muted
+  playsInline
+  width="100%"
+>
+  Your browser does not support the video tag.
+</video>
 
 When you're ready to go deeper, Strands harness is fully customizable. You can easily override any default, swap models, add tools, or gradually replace components all the way down to the Strands Harness SDK. The code is yours.
 
