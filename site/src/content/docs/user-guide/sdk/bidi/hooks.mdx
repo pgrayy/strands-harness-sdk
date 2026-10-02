@@ -48,6 +48,8 @@ class LifecycleLogger:
 agent = BidiAgent(hooks=[LifecycleLogger()])
 ```
 
+`LocalAgent` is the interface shared by `Agent` and `BidiAgent`. Using `AgentInitializedEvent[LocalAgent]` lets the initialization callback work with either agent type.
+
 See [Agent hooks](../agents/hooks.mdx) for individual callbacks, event type inference, and other registration options.
 
 ## Hook events
