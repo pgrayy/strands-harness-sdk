@@ -410,6 +410,7 @@ sidebar:
               - label: "Overview"
                 slug: docs/user-guide/sdk/bidi
               - docs/user-guide/sdk/bidi/agent
+              - docs/user-guide/sdk/bidi/tools
               - label: Models
                 items:
                   - docs/user-guide/sdk/bidi/models/bedrock
