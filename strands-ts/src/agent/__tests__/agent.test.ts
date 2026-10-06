@@ -1434,6 +1434,80 @@ describe('Agent', () => {
   })
 
   describe('structured output', () => {
+    describe('attempt limit', () => {
+      const schema = z.object({ steps: z.array(z.string()) })
+      const valid = { steps: ['review'] }
+
+      function outputTurn(input: ToolUseBlock['input'] = {}, toolUseId = 'output'): ToolUseBlock {
+        return new ToolUseBlock({ name: 'strands_structured_output', toolUseId, input })
+      }
+
+      it('limits each invocation to three failed attempts', async () => {
+        const model = new MockMessageModel()
+        for (let attempt = 0; attempt < 6; attempt++) model.addTurn(outputTurn({}, `output-${attempt}`))
+        model.addTurn(outputTurn(valid))
+        const agent = new Agent({ model, printer: false })
+
+        for (const calls of [3, 6]) {
+          const result = await agent.invoke('Plan a review', {
+            structuredOutputSchema: schema,
+            limits: { structuredOutputAttempts: 3 },
+          })
+          expect(result.stopReason).toBe('limitStructuredOutputAttempts')
+          expect(result.structuredOutput).toBeUndefined()
+          expect(model.callCount).toBe(calls)
+          expect(agent.tools.map((entry) => entry.name)).not.toContain('strands_structured_output')
+          expect(agent.messages.at(-1)?.content).toEqual([
+            expect.objectContaining({ type: 'toolResultBlock', status: 'error' }),
+          ])
+        }
+      })
+
+      it('counts one attempt per model response', async () => {
+        const model = new MockMessageModel()
+          .addTurn([outputTurn({}, 'invalid-1'), outputTurn({}, 'invalid-2')])
+          .addTurn(outputTurn(valid))
+        const agent = new Agent({ model, structuredOutputSchema: schema, printer: false })
+
+        const result = await agent.invoke('Plan a review', { limits: { structuredOutputAttempts: 2 } })
+
+        expect(result.structuredOutput).toEqual(valid)
+        expect(model.callCount).toBe(2)
+      })
+
+      it.each([
+        { limits: { turns: 1 }, stopReason: 'limitTurns' },
+        { limits: { outputTokens: 1 }, stopReason: 'limitOutputTokens' },
+        { limits: { totalTokens: 2 }, stopReason: 'limitTotalTokens' },
+      ])('checks $stopReason before the attempt limit', async ({ limits, stopReason }) => {
+        const model = new MockMessageModel()
+          .addTurn(outputTurn(), { usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } })
+          .addTurn(new Error('Unexpected model call'))
+        const agent = new Agent({ model, structuredOutputSchema: schema, printer: false })
+
+        const result = await agent.invoke('Plan a review', { limits: { ...limits, structuredOutputAttempts: 1 } })
+
+        expect(result.stopReason).toBe(stopReason)
+        expect(result.structuredOutput).toBeUndefined()
+        expect(model.callCount).toBe(1)
+      })
+
+      it('does not count ordinary tool failures', async () => {
+        const unavailable = createMockTool('unavailable', () => {
+          throw new Error('service unavailable')
+        })
+        const model = new MockMessageModel()
+          .addTurn({ type: 'toolUseBlock', name: 'unavailable', toolUseId: 'service', input: {} })
+          .addTurn(outputTurn(valid))
+        const agent = new Agent({ model, tools: [unavailable], structuredOutputSchema: schema, printer: false })
+
+        expect(
+          (await agent.invoke('Plan a review', { limits: { structuredOutputAttempts: 1 } })).structuredOutput
+        ).toEqual(valid)
+        expect(model.callCount).toBe(2)
+      })
+    })
+
     it('returns structured output when schema provided and tool used', async () => {
       const schema = z.object({ name: z.string(), age: z.number() })
 
@@ -2365,6 +2439,8 @@ describe('normalizeToolUseNames', () => {
         ['zero', { limits: { turns: 0 } }],
         ['NaN', { limits: { outputTokens: NaN } }],
         ['Infinity', { limits: { totalTokens: Infinity } }],
+        ['zero structured output attempts', { limits: { structuredOutputAttempts: 0 } }],
+        ['null structured output attempts', { limits: { structuredOutputAttempts: null as unknown as number } }],
       ])('rejects %s with TypeError', async (_label, options) => {
         const agent = new Agent({ model: new MockMessageModel().addTurn({ type: 'textBlock', text: 'never reached' }) })
         await expect(agent.invoke('go', options)).rejects.toThrow(TypeError)

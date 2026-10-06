@@ -66,16 +66,19 @@ INITIAL_DELAY = 4
 MAX_DELAY = 240  # 4 minutes
 
 
-def _check_limits(agent: "Agent", limits: Limits | None) -> StopReason | None:
-    """Evaluate per-invocation budget caps against the current invocation's metrics.
+def _check_limits(
+    agent: "Agent", limits: Limits | None, structured_output_context: StructuredOutputContext
+) -> StopReason | None:
+    """Evaluate per-invocation budget caps.
 
     Reads from ``EventLoopMetrics.latest_agent_invocation`` (scoped to the current
     invocation) so caps don't fire prematurely on the second invoke against a reused
-    agent. Priority on simultaneous trip: turns -> total_tokens -> output_tokens.
+    agent. Priority on simultaneous trip: turns -> total_tokens -> output_tokens -> structured_output_attempts.
 
     Args:
         agent: The agent whose metrics to read.
         limits: The configured caps, or ``None`` for no caps.
+        structured_output_context: Structured-output state for the current invocation.
 
     Returns:
         The matching ``StopReason`` if a cap has been reached, otherwise ``None``.
@@ -99,6 +102,9 @@ def _check_limits(agent: "Agent", limits: Limits | None) -> StopReason | None:
     output_cap = limits.get("output_tokens")
     if output_cap is not None and output_tokens >= output_cap:
         return "limit_output_tokens"
+    structured_output_cap = limits.get("structured_output_attempts")
+    if structured_output_cap is not None and structured_output_context.failed_attempts >= structured_output_cap:
+        return "limit_structured_output_attempts"
     return None
 
 
@@ -237,7 +243,7 @@ async def event_loop_cycle(
 
     # Caps are positive and use >= semantics, so a trip implies at least one prior cycle
     # ran — meaning agent.messages[-1] exists.
-    limit_stop_reason = _check_limits(agent, limits)
+    limit_stop_reason = _check_limits(agent, limits, structured_output_context)
     if limit_stop_reason is not None:
         if "request_state" not in invocation_state:
             invocation_state["request_state"] = {}
@@ -1020,6 +1026,9 @@ async def _handle_tool_execution(
         )
         return
 
+    structured_output_context.record_failure(
+        [content["toolUse"] for content in message["content"] if "toolUse" in content]
+    )
     events = recurse_event_loop(
         agent=agent,
         invocation_state=invocation_state,

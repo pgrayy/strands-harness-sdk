@@ -31,6 +31,7 @@ class StructuredOutputContext:
             structured_output_prompt: Optional custom prompt message to use when forcing structured output.
                 Defaults to "You must format the previous response as structured output."
         """
+        self.failed_attempts = 0
         self.results: dict[str, BaseModel] = {}
         self.structured_output_model: type[BaseModel] | None = structured_output_model
         self.structured_output_tool: StructuredOutputTool | None = None
@@ -44,6 +45,15 @@ class StructuredOutputContext:
         if structured_output_model:
             self.structured_output_tool = StructuredOutputTool(structured_output_model)
             self.expected_tool_name = self.structured_output_tool.tool_name
+
+    def record_failure(self, tool_uses: list[ToolUse]) -> None:
+        """Count a failed structured-output attempt.
+
+        Args:
+            tool_uses: Tool requests from the current model response.
+        """
+        if self.has_structured_output_tool(tool_uses):
+            self.failed_attempts += 1
 
     @property
     def is_enabled(self) -> bool:

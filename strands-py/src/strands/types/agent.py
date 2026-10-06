@@ -153,8 +153,8 @@ class Limits(TypedDict, total=False):
     for no limit on that dimension.
 
     Priority on simultaneous trip (highest first): ``turns``, ``total_tokens``,
-    ``output_tokens``. The corresponding ``stop_reason`` is ``"limit_turns"``,
-    ``"limit_total_tokens"``, or ``"limit_output_tokens"``.
+    ``output_tokens``, ``structured_output_attempts``. The corresponding ``stop_reason`` is
+    ``"limit_turns"``, ``"limit_total_tokens"``, ``"limit_output_tokens"``, or ``"limit_structured_output_attempts"``.
 
     Attributes:
         turns: Maximum number of agent loop iterations (turns). One turn is one model
@@ -169,11 +169,15 @@ class Limits(TypedDict, total=False):
             (``metrics.latest_agent_invocation.usage["totalTokens"]``). Each model call's
             input includes prior turns, so this counter compounds across the run and
             approximates total token spend. Soft cap, same caveat as ``output_tokens``.
+        structured_output_attempts: Maximum number of structured-output attempts. Each model response
+            requesting the output tool counts once, even if it requests the tool multiple times.
+            Other tool calls do not consume this budget.
     """
 
     turns: int
     output_tokens: int
     total_tokens: int
+    structured_output_attempts: int
 
 
 _LIMITS_KEYS = tuple(Limits.__annotations__)
