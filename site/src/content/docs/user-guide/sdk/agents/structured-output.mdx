@@ -123,8 +123,9 @@ Strands accepts the <Syntax py="structured_output_model" ts="structuredOutputSch
 
 ## Error Handling
 
-Catch <Syntax py="StructuredOutputException" ts="StructuredOutputError" /> to handle
-failures such as the model refusing to call the output tool after tool use is forced.
+Without an attempt limit, catch
+<Syntax py="StructuredOutputException" ts="StructuredOutputError" />
+if the model ends its turn without calling a tool when the output tool is forced.
 
 <Tabs>
 <Tab label="Python">
@@ -159,15 +160,16 @@ except StructuredOutputException as error:
 </Tab>
 </Tabs>
 
-### Limit validation attempts
+### Limit attempts
 
 To cap structured-output attempts per invocation, set
 <Syntax py="limits['structured_output_attempts']" ts="limits.structuredOutputAttempts" />.
-When validation fails, the agent sends the error back to the model for correction.
-Without a limit, these attempts are unbounded.
+With this limit, the agent retries both invalid output-tool calls and responses that
+do not call the output tool when forced. Each failed response counts once.
 
-Each model response that requests structured output counts as one attempt, even if
-it requests the output tool several times. Other tool calls do not consume this budget.
+Without a limit, validation retries are unbounded, but a single forced attempt that
+ends without a tool call raises
+<Syntax py="StructuredOutputException" ts="StructuredOutputError" />.
 
 When the limit is reached, the agent returns
 <Syntax py="limit_structured_output_attempts" ts="limitStructuredOutputAttempts" />

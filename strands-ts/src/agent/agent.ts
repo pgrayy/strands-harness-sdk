@@ -1654,12 +1654,13 @@ export class Agent implements LocalAgent, InvokableAgent {
             const modelResult = yield* this._invokeModel(invocationState, structuredOutputChoice)
 
             if (modelResult.stopReason !== 'toolUse') {
-              // Schema set, we already forced, and the model still refused.
-              // Throw before closing the span so the cycle span records the error.
               if (structuredOutputTool && structuredOutputChoice) {
-                throw new StructuredOutputError(
-                  'The model failed to invoke the structured output tool even after it was forced.'
-                )
+                if (options?.limits?.structuredOutputAttempts === undefined) {
+                  throw new StructuredOutputError(
+                    'The model failed to invoke the structured output tool even after it was forced.'
+                  )
+                }
+                failedStructuredOutputAttempts++
               }
 
               closeCycle()
@@ -1840,9 +1841,10 @@ export class Agent implements LocalAgent, InvokableAgent {
 
           if (
             structuredOutputTool &&
-            assistantMessage.content.some(
-              (block) => block.type === 'toolUseBlock' && block.name === STRUCTURED_OUTPUT_TOOL_NAME
-            )
+            (structuredOutputChoice ||
+              assistantMessage.content.some(
+                (block) => block.type === 'toolUseBlock' && block.name === STRUCTURED_OUTPUT_TOOL_NAME
+              ))
           ) {
             failedStructuredOutputAttempts++
           }

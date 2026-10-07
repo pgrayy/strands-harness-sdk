@@ -11,6 +11,7 @@ from strands.telemetry.metrics import EventLoopMetrics
 from strands.tools.structured_output._structured_output_context import StructuredOutputContext
 from strands.tools.structured_output.structured_output_tool import StructuredOutputTool
 from strands.types._events import EventLoopStopEvent
+from strands.types.exceptions import StructuredOutputException
 from tests.fixtures.mocked_model_provider import MockedModelProvider
 
 
@@ -43,6 +44,51 @@ def _structured_response(tool_input, tool_use_id):
             }
         ],
     }
+
+
+@pytest.mark.parametrize(
+    ("responses", "succeeds"),
+    [
+        pytest.param(["text", "text", "text", "text"], False, id="no-output-tool-calls"),
+        pytest.param(["invalid", "text", "text", "text"], False, id="invalid-input-before-forcing"),
+        pytest.param(["text", "other", "invalid", "text"], False, id="different-tool-called-when-forced"),
+        pytest.param(["text", "text", "invalid", "valid"], True, id="valid-output-on-final-attempt"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_invoke_async_limits_retries_when_forced_tool_is_not_called(responses, succeeds):
+    valid = {"name": "Alice", "age": 30, "email": "alice@example.com"}
+    messages = {
+        "text": {"role": "assistant", "content": [{"text": "Plain text instead of structured output"}]},
+        "invalid": _structured_response({}, "invalid"),
+        "valid": _structured_response(valid, "valid"),
+        "other": {
+            "role": "assistant",
+            "content": [{"toolUse": {"toolUseId": "other", "name": "unknown_tool", "input": {}}}],
+        },
+    }
+    model = MockedModelProvider([messages[response] for response in responses] + [messages["valid"]])
+    agent = Agent(model=model, callback_handler=None)
+
+    result = await agent.invoke_async(
+        "Extract the data", structured_output_model=UserModel, limits={"structured_output_attempts": 3}
+    )
+
+    assert result.stop_reason == ("tool_use" if succeeds else "limit_structured_output_attempts")
+    assert result.structured_output == (UserModel(**valid) if succeeds else None)
+    assert model.index == 4
+
+
+@pytest.mark.asyncio
+async def test_invoke_async_raises_without_attempt_limit_when_forced_tool_is_not_called():
+    text = {"role": "assistant", "content": [{"text": "Plain text instead of structured output"}]}
+    model = MockedModelProvider([text, text])
+    agent = Agent(model=model, callback_handler=None)
+
+    with pytest.raises(StructuredOutputException, match="even after it was forced"):
+        await agent.invoke_async("Extract the data", structured_output_model=UserModel, limits={"turns": 5})
+
+    assert model.index == 2
 
 
 @pytest.mark.asyncio

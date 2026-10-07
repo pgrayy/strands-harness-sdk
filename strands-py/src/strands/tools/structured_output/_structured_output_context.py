@@ -47,12 +47,12 @@ class StructuredOutputContext:
             self.expected_tool_name = self.structured_output_tool.tool_name
 
     def record_failure(self, tool_uses: list[ToolUse]) -> None:
-        """Count a failed structured-output attempt.
+        """Count a failed structured-output attempt before retrying.
 
         Args:
             tool_uses: Tool requests from the current model response.
         """
-        if self.has_structured_output_tool(tool_uses):
+        if self.forced_mode or self.has_structured_output_tool(tool_uses):
             self.failed_attempts += 1
 
     @property

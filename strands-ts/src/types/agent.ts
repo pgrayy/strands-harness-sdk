@@ -190,9 +190,10 @@ export interface InvokeOptions {
     totalTokens?: number
 
     /**
-     * Maximum number of structured-output attempts. Each model response requesting
-     * the output tool counts once, even if it requests the tool multiple times.
-     * Other tool calls do not consume this budget.
+     * Maximum number of structured-output attempts. Counts one failed attempt per
+     * model response if the model calls the output tool with invalid input or does
+     * not call it when forced. When omitted, validation retries are unbounded;
+     * ending a forced turn without a tool call throws StructuredOutputError.
      */
     structuredOutputAttempts?: number
   }

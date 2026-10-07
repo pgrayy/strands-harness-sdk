@@ -169,9 +169,10 @@ class Limits(TypedDict, total=False):
             (``metrics.latest_agent_invocation.usage["totalTokens"]``). Each model call's
             input includes prior turns, so this counter compounds across the run and
             approximates total token spend. Soft cap, same caveat as ``output_tokens``.
-        structured_output_attempts: Maximum number of structured-output attempts. Each model response
-            requesting the output tool counts once, even if it requests the tool multiple times.
-            Other tool calls do not consume this budget.
+        structured_output_attempts: Maximum number of structured-output attempts. Counts one failed
+            attempt per model response if the model calls the output tool with invalid input or does
+            not call it when forced. When omitted, validation retries are unbounded; ending a forced
+            turn without a tool call raises ``StructuredOutputException``.
     """
 
     turns: int

@@ -373,10 +373,14 @@ async def event_loop_cycle(
 
             # Force structured output tool call if LLM didn't use it automatically
             if structured_output_context.is_enabled and stop_reason == "end_turn":
-                if structured_output_context.force_attempted:
+                if (
+                    structured_output_context.force_attempted
+                    and (limits or {}).get("structured_output_attempts") is None
+                ):
                     raise StructuredOutputException(
                         "The model failed to invoke the structured output tool even after it was forced."
                     )
+                structured_output_context.record_failure([])
                 tool_spec = structured_output_context.get_tool_spec()
                 structured_output_context.set_forced_mode({"tool": {"name": tool_spec["name"]}} if tool_spec else None)
                 logger.debug("Forcing structured output tool")
