@@ -32,6 +32,7 @@ import {
   BeforeInvocationEvent,
   BeforeModelCallEvent,
   BeforeToolsEvent,
+  InterruptEvent,
 } from '../../hooks/events.js'
 import { BedrockModel } from '../../models/bedrock.js'
 import { StructuredOutputError } from '../../errors.js'
@@ -1500,6 +1501,30 @@ describe('Agent', () => {
             expect.objectContaining({ type: 'toolResultBlock', status: 'error' }),
           ])
         }
+      })
+
+      it('resets structured output attempts on hook resume', async () => {
+        const model = new MockMessageModel()
+        for (let attempt = 0; attempt < 6; attempt++) model.addTurn(outputTurn({}, `output-${attempt}`))
+        const agent = new Agent({ model, structuredOutputSchema: schema, printer: false })
+        let resumeInput: AfterInvocationEvent['resume']
+
+        agent.addHook(BeforeToolsEvent, (event) => {
+          if (model.callCount === 3) event.interrupt({ name: 'approve' })
+        })
+        agent.addHook(InterruptEvent, (event) => {
+          resumeInput = [{ interruptResponse: { interruptId: event.interrupt.id, response: 'approved' } }]
+        })
+        agent.addHook(AfterInvocationEvent, (event) => {
+          event.resume = resumeInput
+          resumeInput = undefined
+        })
+
+        const result = await agent.invoke('Plan a review', { limits: { structuredOutputAttempts: 3 } })
+
+        expect(result.stopReason).toBe('limitStructuredOutputAttempts')
+        expect(result.structuredOutput).toBeUndefined()
+        expect(model.callCount).toBe(5)
       })
 
       it('counts one attempt per model response', async () => {

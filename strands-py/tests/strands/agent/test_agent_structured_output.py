@@ -7,6 +7,7 @@ import pytest
 from pydantic import BaseModel
 
 from strands import Agent, tool
+from strands.hooks import AfterInvocationEvent, BeforeToolsEvent
 from strands.telemetry.metrics import EventLoopMetrics
 from strands.tools.structured_output._structured_output_context import StructuredOutputContext
 from strands.tools.structured_output.structured_output_tool import StructuredOutputTool
@@ -105,6 +106,34 @@ async def test_invoke_async_limits_structured_output_attempts_per_invocation():
         assert model.index == calls
         assert agent.messages[-1]["content"][0]["toolResult"]["status"] == "error"
         assert UserModel.__name__ not in agent.tool_registry.dynamic_tools
+
+
+@pytest.mark.asyncio
+async def test_invoke_async_preserves_structured_output_attempts_on_hook_resume():
+    model = MockedModelProvider([_structured_response({}, f"output-{attempt}") for attempt in range(6)])
+    agent = Agent(model=model, callback_handler=None)
+
+    def approve_tools(event: BeforeToolsEvent):
+        if model.index == 3:
+            event.interrupt("approve")
+
+    def resume_interrupt(event: AfterInvocationEvent):
+        if event.result and event.result.stop_reason == "interrupt":
+            event.resume = [
+                {"interruptResponse": {"interruptId": interrupt.id, "response": "approved"}}
+                for interrupt in event.result.interrupts
+            ]
+
+    agent.hooks.add_callback(BeforeToolsEvent, approve_tools)
+    agent.hooks.add_callback(AfterInvocationEvent, resume_interrupt)
+
+    result = await agent.invoke_async(
+        "Extract the data", structured_output_model=UserModel, limits={"structured_output_attempts": 3}
+    )
+
+    assert result.stop_reason == "limit_structured_output_attempts"
+    assert result.structured_output is None
+    assert model.index == 3
 
 
 @pytest.mark.parametrize(

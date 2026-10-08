@@ -907,17 +907,15 @@ export class Agent implements LocalAgent, InvokableAgent {
    * against the current invocation's counters. Called at the top of each
    * agent-loop iteration, after `_throwIfCancelled` and before `startCycle`.
    *
-   * Reads from {@link AgentMetrics.latestAgentInvocation} (scoped to the
-   * current invocation) — not `cycleCount` / `accumulatedUsage`, which are
-   * lifetime accumulators that would cause caps to fire prematurely on the
-   * second `invoke()` call against a reused agent.
+   * Uses invocation-scoped counters from the meter so budgets reset when a
+   * new invocation starts.
    *
    * Priority on simultaneous trip: turns → totalTokens → outputTokens → structuredOutputAttempts.
    *
    * Returns the {@link StopReason} the loop should terminate with, or
    * `undefined` if every configured cap is still within budget.
    */
-  private _checkLimits(options: InvokeOptions | undefined, structuredOutputAttempts: number): StopReason | undefined {
+  private _checkLimits(options: InvokeOptions | undefined): StopReason | undefined {
     const limits = options?.limits
     if (!limits) return undefined
     const invocation = this._meter.metrics.latestAgentInvocation
@@ -935,7 +933,10 @@ export class Agent implements LocalAgent, InvokableAgent {
     if (limits.outputTokens !== undefined && outputTokens >= limits.outputTokens) {
       return 'limitOutputTokens'
     }
-    if (limits.structuredOutputAttempts !== undefined && structuredOutputAttempts >= limits.structuredOutputAttempts) {
+    if (
+      limits.structuredOutputAttempts !== undefined &&
+      this._meter.structuredOutput.failedAttempts >= limits.structuredOutputAttempts
+    ) {
       return 'limitStructuredOutputAttempts'
     }
     return undefined
@@ -1543,7 +1544,6 @@ export class Agent implements LocalAgent, InvokableAgent {
     const structuredOutputSchema = options?.structuredOutputSchema ?? this._structuredOutputSchema
     const structuredOutputTool = structuredOutputSchema ? new StructuredOutputTool(structuredOutputSchema) : undefined
     let structuredOutputChoice: ToolChoice | undefined
-    let failedStructuredOutputAttempts = 0
 
     // Resolve per-invocation state once. The same object is threaded through
     // every lifecycle hook event, every tool context, and is surfaced on the
@@ -1588,7 +1588,7 @@ export class Agent implements LocalAgent, InvokableAgent {
       while (true) {
         this._throwIfCancelled()
 
-        const limitStopReason = this._checkLimits(options, failedStructuredOutputAttempts)
+        const limitStopReason = this._checkLimits(options)
         if (limitStopReason) {
           result = new AgentResult({
             stopReason: limitStopReason,
@@ -1655,12 +1655,12 @@ export class Agent implements LocalAgent, InvokableAgent {
 
             if (modelResult.stopReason !== 'toolUse') {
               if (structuredOutputTool && structuredOutputChoice) {
+                this._meter.updateStructuredOutput({ failedAttempts: 1 })
                 if (options?.limits?.structuredOutputAttempts === undefined) {
                   throw new StructuredOutputError(
                     'The model failed to invoke the structured output tool even after it was forced.'
                   )
                 }
-                failedStructuredOutputAttempts++
               }
 
               closeCycle()
@@ -1846,7 +1846,7 @@ export class Agent implements LocalAgent, InvokableAgent {
                 (block) => block.type === 'toolUseBlock' && block.name === STRUCTURED_OUTPUT_TOOL_NAME
               ))
           ) {
-            failedStructuredOutputAttempts++
+            this._meter.updateStructuredOutput({ failedAttempts: 1 })
           }
         } catch (error) {
           closeCycle(error as Error)

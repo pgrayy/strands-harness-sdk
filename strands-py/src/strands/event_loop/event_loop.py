@@ -66,19 +66,15 @@ INITIAL_DELAY = 4
 MAX_DELAY = 240  # 4 minutes
 
 
-def _check_limits(
-    agent: "Agent", limits: Limits | None, structured_output_context: StructuredOutputContext
-) -> StopReason | None:
+def _check_limits(agent: "Agent", limits: Limits | None) -> StopReason | None:
     """Evaluate per-invocation budget caps.
 
-    Reads from ``EventLoopMetrics.latest_agent_invocation`` (scoped to the current
-    invocation) so caps don't fire prematurely on the second invoke against a reused
-    agent. Priority on simultaneous trip: turns -> total_tokens -> output_tokens -> structured_output_attempts.
+    Reads invocation-scoped counters from ``EventLoopMetrics``.
+    Priority on simultaneous trip: turns -> total_tokens -> output_tokens -> structured_output_attempts.
 
     Args:
         agent: The agent whose metrics to read.
         limits: The configured caps, or ``None`` for no caps.
-        structured_output_context: Structured-output state for the current invocation.
 
     Returns:
         The matching ``StopReason`` if a cap has been reached, otherwise ``None``.
@@ -103,7 +99,10 @@ def _check_limits(
     if output_cap is not None and output_tokens >= output_cap:
         return "limit_output_tokens"
     structured_output_cap = limits.get("structured_output_attempts")
-    if structured_output_cap is not None and structured_output_context.failed_attempts >= structured_output_cap:
+    if (
+        structured_output_cap is not None
+        and agent.event_loop_metrics._structured_output.failed_attempts >= structured_output_cap
+    ):
         return "limit_structured_output_attempts"
     return None
 
@@ -243,7 +242,7 @@ async def event_loop_cycle(
 
     # Caps are positive and use >= semantics, so a trip implies at least one prior cycle
     # ran — meaning agent.messages[-1] exists.
-    limit_stop_reason = _check_limits(agent, limits, structured_output_context)
+    limit_stop_reason = _check_limits(agent, limits)
     if limit_stop_reason is not None:
         if "request_state" not in invocation_state:
             invocation_state["request_state"] = {}
@@ -373,6 +372,8 @@ async def event_loop_cycle(
 
             # Force structured output tool call if LLM didn't use it automatically
             if structured_output_context.is_enabled and stop_reason == "end_turn":
+                if structured_output_context.forced_mode:
+                    agent.event_loop_metrics._update_structured_output(failed_attempts=1)
                 if (
                     structured_output_context.force_attempted
                     and (limits or {}).get("structured_output_attempts") is None
@@ -380,7 +381,6 @@ async def event_loop_cycle(
                     raise StructuredOutputException(
                         "The model failed to invoke the structured output tool even after it was forced."
                     )
-                structured_output_context.record_failure([])
                 tool_spec = structured_output_context.get_tool_spec()
                 structured_output_context.set_forced_mode({"tool": {"name": tool_spec["name"]}} if tool_spec else None)
                 logger.debug("Forcing structured output tool")
@@ -1030,9 +1030,10 @@ async def _handle_tool_execution(
         )
         return
 
-    structured_output_context.record_failure(
+    if structured_output_context.forced_mode or structured_output_context.has_structured_output_tool(
         [content["toolUse"] for content in message["content"] if "toolUse" in content]
-    )
+    ):
+        agent.event_loop_metrics._update_structured_output(failed_attempts=1)
     events = recurse_event_loop(
         agent=agent,
         invocation_state=invocation_state,
