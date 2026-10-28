@@ -64,16 +64,6 @@ export interface AgentLoopMetricsData {
 }
 
 /**
- * Per-invocation structured-output metrics.
- */
-interface StructuredOutputMetrics {
-  /**
-   * Failed attempts handled by the structured-output retry loop, counted once per response.
-   */
-  failedAttempts: number
-}
-
-/**
  * Per-invocation metrics tracking.
  */
 export interface InvocationMetricsData {
@@ -330,11 +320,6 @@ export class Meter {
   private readonly _agentInvocations: InvocationMetricsData[] = []
 
   /**
-   * Structured-output metrics for the current invocation.
-   */
-  private _structuredOutput: StructuredOutputMetrics = { failedAttempts: 0 }
-
-  /**
    * Per-tool execution metrics keyed by tool name.
    */
   private readonly _toolMetrics: Record<string, ToolMetricsData> = {}
@@ -408,8 +393,9 @@ export class Meter {
   }
 
   /**
-   * Start tracking a new invocation with fresh usage, cycles, and internal counters.
-   * Preserves accumulated totals and keeps up to MAX_INVOCATION_HISTORY invocation records.
+   * Begin tracking a new agent invocation.
+   * Creates a new InvocationMetricsData entry for per-invocation metrics.
+   * Evicts the oldest entry when the history exceeds MAX_INVOCATION_HISTORY.
    */
   startNewInvocation(): void {
     if (this._agentInvocations.length >= MAX_INVOCATION_HISTORY) {
@@ -420,7 +406,6 @@ export class Meter {
       cycles: [],
       usage: createEmptyUsage(),
     })
-    this._structuredOutput = { failedAttempts: 0 }
     this._otelInvocationCounter.add(1)
   }
 
@@ -509,25 +494,6 @@ export class Meter {
     if (metadata) {
       this._updateFromMetadata(metadata)
     }
-  }
-
-  /**
-   * Accumulate structured-output metrics for the current invocation.
-   *
-   * @param metrics - Counts to add to the current invocation
-   * @internal
-   */
-  updateStructuredOutput(metrics: StructuredOutputMetrics): void {
-    this._structuredOutput.failedAttempts += metrics.failedAttempts
-  }
-
-  /**
-   * Structured-output metrics for the current invocation.
-   *
-   * @internal
-   */
-  get structuredOutput(): Readonly<StructuredOutputMetrics> {
-    return this._structuredOutput
   }
 
   /**

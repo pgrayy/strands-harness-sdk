@@ -41,6 +41,7 @@ import type {
 } from '../middleware/types.js'
 import type { ToolRegistry } from '../registry/tool-registry.js'
 import type { Model } from '../models/model.js'
+import type { InvocationContext } from '../agent/invocation-context.js'
 import type { z } from 'zod'
 import { AgentMetrics } from '../telemetry/meter.js'
 
@@ -136,71 +137,70 @@ export interface InvokeOptions {
    */
   cancelSignal?: AbortSignal
 
+  /** Runs this call as a nested call in the request a hook event's or {@link ToolContext.invocationContext} handle belongs to, sharing its limits and usage even after that request returned; `limits` set alongside it only add stricter limits. */
+  invocationContext?: InvocationContext
+
   /**
-   * Per-invocation budget caps. Each cap, when set, bounds the agent loop
-   * for this `invoke()` / `stream()` call only — counters are not cumulative
-   * across reuses of the same agent.
+   * Limits for the whole request this `invoke()` / `stream()` call starts. They
+   * apply to this agent's loop and to every nested call: agents passed as tools,
+   * and any Graph or Swarm you pass the request's `invocationContext` to. A Graph
+   * or Swarm can also start a limited request itself through
+   * {@link MultiAgentInvokeOptions.limits}. An agent run by a hand-written
+   * tool joins only when the tool forwards {@link ToolContext.invocationContext} as
+   * {@link InvokeOptions.invocationContext}; otherwise it runs standalone under its
+   * own limits. A nested call can also set its own `limits`: it stops at
+   * whichever limit is reached first, its own or the request's.
    *
-   * Caps are checked at the top of each loop iteration. Tools requested by
-   * the previous turn always run to completion before a cap fires, so
-   * `agent.messages` remains in a reinvokable state.
+   * Auxiliary calls (summarization, routing, memory extraction, steering, HITL,
+   * goal judging, web-fetch, and decision models asked with the request's
+   * `invocationContext`) add their tokens to the request's usage, but no limits
+   * apply to them. The same holds for an agent that an extension point (a
+   * conversation manager, context or routing strategy, or memory extractor) runs
+   * with the `invocationContext` it receives, unless the extension point also passes
+   * `limits`. Usage starts from zero on each top-level call; pass
+   * {@link AgentResult.invocationContext} to a later call to continue on the same
+   * limits and usage.
    *
-   * Each cap, when set, must be a positive finite number. Omit any field
-   * (or `limits` itself) for no limit on that dimension.
+   * Limits are checked before each turn, so tools requested by the previous turn
+   * finish first and `agent.messages` stays reinvokable. Each limit, when set,
+   * must be a positive finite number; omit a field (or `limits` itself) for no
+   * limit on that dimension.
    *
-   * Priority on simultaneous trip (highest first): `turns`, `totalTokens`,
-   * `outputTokens`, `structuredOutputAttempts`. The corresponding `stopReason` is
-   * `'limitTurns'`, `'limitTotalTokens'`, `'limitOutputTokens'`, or `'limitStructuredOutputAttempts'`.
+   * Priority when several are reached at once (highest first): `turns`,
+   * `totalTokens`, `outputTokens`, `structuredOutputAttempts`, with `stopReason`
+   * `'limitTurns'`, `'limitTotalTokens'`, `'limitOutputTokens'`, or
+   * `'limitStructuredOutputAttempts'`.
    */
-  limits?: {
-    /**
-     * Maximum number of agent loop iterations (turns). A turn is one model
-     * call plus any tool execution that follows. Counted against
-     * `metrics.latestAgentInvocation.cycles.length`.
-     */
-    turns?: number
-
-    /**
-     * Maximum cumulative model-generated tokens, summed across every model
-     * call in the agent loop
-     * (`metrics.latestAgentInvocation.usage.outputTokens`).
-     *
-     * Distinct from per-call provider-level `maxTokens` settings (e.g.
-     * `GoogleModelConfig.params.maxOutputTokens`), which bound a single
-     * model call's output. This cap bounds the loop's cumulative output
-     * across however many calls it makes.
-     *
-     * Soft cap: a single oversized model response can overshoot the budget.
-     * The agent stops at the first turn boundary on or after the budget is
-     * reached; it does not bound any individual model call.
-     */
-    outputTokens?: number
-
-    /**
-     * Maximum cumulative input + output tokens
-     * (`metrics.latestAgentInvocation.usage.totalTokens`). Each model
-     * call's input includes prior turns, so this counter compounds across
-     * the run — it approximates the total token spend you would be billed
-     * for.
-     *
-     * Soft cap: a single oversized model response can overshoot the budget.
-     * The agent stops at the first turn boundary on or after the budget is
-     * reached; it does not bound any individual model call.
-     */
-    totalTokens?: number
-
-    /**
-     * Maximum number of structured-output attempts. Counts one failed attempt per
-     * model response if the model calls the output tool with invalid input or does
-     * not call it when forced. When omitted, validation retries are unbounded;
-     * ending a forced turn without a tool call throws StructuredOutputError.
-     */
-    structuredOutputAttempts?: number
-  }
+  limits?: InvokeLimits
 }
 
 /**
- * The cap names recognized by {@link InvokeOptions.limits}.
+ * Limits for the request a top-level `invoke()` / `stream()` call starts. Each
+ * is optional; omit a field for no limit on that dimension. Token limits count
+ * every model call in the request, unlike a provider's per-call `maxTokens`, and
+ * are checked before each turn, so the last turn can go over a limit, more so
+ * when nested calls run in parallel. A model response counts as one failed
+ * structured output attempt when it calls the structured output tool with invalid
+ * input, or doesn't return valid structured output while the tool is forced,
+ * including when a content filter or guardrail stops it. See
+ * {@link InvokeOptions.limits} for what they cover.
+ */
+export interface InvokeLimits {
+  /** Maximum turns (one model call plus the tool calls it requests) across the request. */
+  turns?: number
+
+  /** Maximum model-generated tokens across every model call in the request. */
+  outputTokens?: number
+
+  /** Maximum input + output tokens across every model call in the request; input grows each turn, so this compounds. */
+  totalTokens?: number
+
+  /** Maximum failed structured output attempts across the request; when omitted, retries are unbounded and a failed forced response throws `StructuredOutputError`. */
+  structuredOutputAttempts?: number
+}
+
+/**
+ * The limit names recognized by {@link InvokeOptions.limits}.
  *
  * @internal
  */
@@ -339,6 +339,9 @@ export interface LocalAgent {
    */
   readonly model: Model
 
+  /** Model used for auxiliary side calls; defaults to `model`. See {@link Agent.auxModel}. */
+  readonly auxModel: Model
+
   /**
    * The system prompt to pass to the model provider.
    */
@@ -475,6 +478,17 @@ export class AgentResult {
   readonly metrics?: AgentMetrics
 
   /**
+   * The invocation context this call ran in. Its `usage` covers the whole request
+   * (this agent, its nested calls, and auxiliary calls), unlike {@link metrics},
+   * which covers this agent only; for a nested call that set its own limits, it is
+   * that call's context and covers its share. Pass it as
+   * {@link InvokeOptions.invocationContext} to continue on the same limits and
+   * usage. It is live, so work that finishes after this call returns (for example
+   * a background task) still adds to it.
+   */
+  readonly invocationContext?: InvocationContext
+
+  /**
    * Per-invocation state passed into the agent, threaded through hooks and
    * tools, and surfaced here at the end of the invocation. See
    * {@link InvocationState} for details. Always defined — defaults to `{}` when
@@ -503,6 +517,7 @@ export class AgentResult {
     invocationState: InvocationState
     traces?: AgentTrace[]
     metrics?: AgentMetrics
+    invocationContext?: InvocationContext
     structuredOutput?: z.output<z.ZodType>
     interrupts?: Interrupt[]
     checkpoint?: Checkpoint
@@ -515,6 +530,9 @@ export class AgentResult {
     }
     if (data.metrics !== undefined) {
       this.metrics = data.metrics
+    }
+    if (data.invocationContext !== undefined) {
+      this.invocationContext = data.invocationContext
     }
     if (data.structuredOutput !== undefined) {
       this.structuredOutput = data.structuredOutput
@@ -547,12 +565,13 @@ export class AgentResult {
   }
 
   /**
-   * Custom JSON serialization that excludes traces, metrics, and invocationState.
+   * Custom JSON serialization that excludes traces, metrics, invocationContext, and invocationState.
    * Traces and metrics are excluded to avoid sending large payloads over the wire
-   * in API responses; `invocationState` is excluded because its values are
-   * caller-owned and may not be serializable (see {@link InvocationState}).
+   * in API responses; `invocationContext` is excluded because it is live and can
+   * still change; `invocationState` is excluded because its values are caller-owned and
+   * may not be serializable (see {@link InvocationState}).
    *
-   * All three remain accessible via their properties for debugging.
+   * All four remain accessible via their properties for debugging.
    *
    * @returns Object representation for safe serialization
    */

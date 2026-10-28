@@ -35,7 +35,10 @@ import {
   InterruptEvent,
 } from '../../hooks/events.js'
 import { BedrockModel } from '../../models/bedrock.js'
+import { ModelRouter } from '../../models/routing/router.js'
+import type { Model } from '../../models/model.js'
 import { StructuredOutputError } from '../../errors.js'
+import { NO_STRUCTURED_OUTPUT_MESSAGE, STRUCTURED_OUTPUT_TOOL_NAME } from '../../tools/structured-output-tool.js'
 import { expectLoopMetrics } from '../../__fixtures__/metrics-helpers.js'
 import { expectAgentResult } from '../../__fixtures__/agent-helpers.js'
 import { anyTrackingId } from '../../__fixtures__/message-helpers.js'
@@ -411,6 +414,39 @@ describe('Agent', () => {
         const agent = new Agent({ model })
 
         await expect(agent.invoke('Test')).rejects.toThrow(MaxTokensError)
+      })
+
+      it.each([
+        ['empty string', ''],
+        ['whitespace string', '  \n'],
+        ['blank text blocks', [new TextBlock(' '), new TextBlock('\n')]],
+        ['blank content block data', [{ text: '' }]],
+        ['user message with blank text', [{ role: 'user' as const, content: [{ text: '' }] }]],
+        ['user message with no content', [{ role: 'user' as const, content: [] }]],
+      ])('rejects a blank prompt (%s) without breaking later calls', async (_, prompt) => {
+        const model = new MockMessageModel().addTurn({ type: 'textBlock', text: 'Hello' })
+        const agent = new Agent({ model })
+
+        await expect(agent.invoke(prompt)).rejects.toThrow('Input prompt is blank')
+
+        expect(agent.messages).toEqual([])
+        const result = await agent.invoke('Hi')
+        expect(result.toString()).toBe('Hello')
+      })
+
+      it.each([
+        ['text alongside blank text', [new TextBlock('hello'), new TextBlock('')]],
+        [
+          'image alongside blank text',
+          [new TextBlock(''), new ImageBlock({ format: 'png', source: { bytes: new Uint8Array([1]) } })],
+        ],
+      ])('accepts a prompt with some non-blank content (%s)', async (_, prompt) => {
+        const model = new MockMessageModel().addTurn({ type: 'textBlock', text: 'Hello' })
+        const agent = new Agent({ model })
+
+        const result = await agent.invoke(prompt)
+
+        expect(result.toString()).toBe('Hello')
       })
     })
 
@@ -1379,6 +1415,57 @@ describe('Agent', () => {
     })
   })
 
+  describe('auxModel', () => {
+    it('defaults to model', () => {
+      const model = new MockMessageModel()
+      const agent = new Agent({ model })
+
+      expect(agent.auxModel).toBe(model)
+    })
+
+    it('uses the configured auxModel', () => {
+      const auxModel = new MockMessageModel()
+      const agent = new Agent({ model: new MockMessageModel(), auxModel })
+
+      expect(agent.auxModel).toBe(auxModel)
+    })
+
+    it('creates BedrockModel from a string model id', () => {
+      const agent = new Agent({
+        model: new MockMessageModel(),
+        auxModel: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+      })
+
+      expect(agent.auxModel).toBeInstanceOf(BedrockModel)
+      expect(agent.auxModel.getConfig().modelId).toBe('us.anthropic.claude-haiku-4-5-20251001-v1:0')
+    })
+
+    it('rejects a ModelRouter', () => {
+      const router = new ModelRouter([new MockMessageModel()])
+
+      expect(() => new Agent({ auxModel: router as unknown as Model })).toThrow(/ModelRouter/)
+    })
+
+    it('is reassignable at runtime', () => {
+      const model = new MockMessageModel()
+      const agent = new Agent({ model })
+      const auxModel = new MockMessageModel()
+
+      agent.auxModel = auxModel
+      expect(agent.auxModel).toBe(auxModel)
+
+      agent.auxModel = 'us.anthropic.claude-haiku-4-5-20251001-v1:0'
+      expect(agent.auxModel).toBeInstanceOf(BedrockModel)
+
+      agent.auxModel = undefined
+      expect(agent.auxModel).toBe(model)
+
+      expect(() => {
+        agent.auxModel = new ModelRouter([new MockMessageModel()]) as unknown as Model
+      }).toThrow(/ModelRouter/)
+    })
+  })
+
   describe('model initialization', () => {
     describe('when model is a string', () => {
       it('creates BedrockModel with specified modelId', () => {
@@ -1438,74 +1525,160 @@ describe('Agent', () => {
     describe('attempt limit', () => {
       const schema = z.object({ steps: z.array(z.string()) })
       const valid = { steps: ['review'] }
+      const textReply = new TextBlock('Plain text instead of structured output')
 
-      function outputTurn(input: ToolUseBlock['input'] = {}, toolUseId = 'output'): ToolUseBlock {
-        return new ToolUseBlock({ name: 'strands_structured_output', toolUseId, input })
+      function outputCall(input: ToolUseBlock['input'] = {}, toolUseId = 'output'): ToolUseBlock {
+        return new ToolUseBlock({ name: STRUCTURED_OUTPUT_TOOL_NAME, toolUseId, input })
       }
 
       it.each([
-        { name: 'no output tool calls', responses: ['text', 'text', 'text', 'text'], succeeds: false },
-        { name: 'invalid input before forcing', responses: ['invalid', 'text', 'text', 'text'], succeeds: false },
-        { name: 'different tool called when forced', responses: ['text', 'other', 'invalid', 'text'], succeeds: false },
-        { name: 'valid output on final attempt', responses: ['text', 'text', 'invalid', 'valid'], succeeds: true },
-      ] as const)('limits retries when the forced tool is not called: $name', async ({ responses, succeeds }) => {
-        const messages = {
-          text: new TextBlock('Plain text instead of structured output'),
-          invalid: outputTurn({}, 'invalid'),
-          valid: outputTurn(valid, 'valid'),
+        {
+          name: 'no output tool calls',
+          responses: ['text', 'text', 'text', 'text'],
+          stopReason: 'limitStructuredOutputAttempts',
+        },
+        {
+          name: 'invalid input before forcing',
+          responses: ['invalid', 'text', 'text', 'text'],
+          stopReason: 'limitStructuredOutputAttempts',
+        },
+        {
+          name: 'different tool called when forced',
+          responses: ['text', 'other', 'invalid', 'text'],
+          stopReason: 'limitStructuredOutputAttempts',
+        },
+        {
+          name: 'valid output on final attempt',
+          responses: ['text', 'text', 'invalid', 'valid'],
+          stopReason: 'toolUse',
+        },
+      ] as const)('retries failed attempts until the limit: $name', async ({ responses, stopReason }) => {
+        const blocks = {
+          text: textReply,
+          invalid: outputCall({}, 'invalid'),
+          valid: outputCall(valid, 'valid'),
           other: new ToolUseBlock({ toolUseId: 'other', name: 'unknown_tool', input: {} }),
         }
         const model = new MockMessageModel()
-        for (const response of responses) model.addTurn(messages[response])
-        model.addTurn(messages.valid)
+        for (const response of responses) model.addTurn(blocks[response])
+        model.addTurn(blocks.valid)
         const agent = new Agent({ model, structuredOutputSchema: schema, printer: false })
 
         const result = await agent.invoke('Plan a review', { limits: { structuredOutputAttempts: 3 } })
 
-        expect(result.stopReason).toBe(succeeds ? 'toolUse' : 'limitStructuredOutputAttempts')
-        expect(result.structuredOutput).toEqual(succeeds ? valid : undefined)
-        expect(model.callCount).toBe(4)
+        expect({
+          stopReason: result.stopReason,
+          structuredOutput: result.structuredOutput,
+          lastContent: result.lastMessage.content,
+          modelCalls: model.callCount,
+        }).toEqual({
+          stopReason,
+          structuredOutput: stopReason === 'toolUse' ? valid : undefined,
+          lastContent: [blocks[responses[3]]],
+          modelCalls: 4,
+        })
+      })
+
+      it('returns the model reply when the limit is reached on the forced retry', async () => {
+        const model = new MockMessageModel().addTurn(textReply).addTurn(textReply)
+        const agent = new Agent({ model, structuredOutputSchema: schema, printer: false })
+
+        const result = await agent.invoke('Plan a review', { limits: { structuredOutputAttempts: 1 } })
+
+        expect({
+          stopReason: result.stopReason,
+          lastContent: result.lastMessage.content,
+          history: agent.messages.map((message) => message.role),
+          modelCalls: model.callCount,
+        }).toEqual({
+          stopReason: 'limitStructuredOutputAttempts',
+          lastContent: [textReply],
+          history: ['user', 'assistant'],
+          modelCalls: 2,
+        })
+        expect(agent.messages[1]).toStrictEqual(result.lastMessage)
+      })
+
+      it('returns the model reply when a turn limit is reached before forcing', async () => {
+        const model = new MockMessageModel().addTurn(textReply).addTurn(new Error('Unexpected model call'))
+        const agent = new Agent({ model, structuredOutputSchema: schema, printer: false })
+
+        const result = await agent.invoke('Plan a review', { limits: { turns: 1 } })
+
+        expect({
+          stopReason: result.stopReason,
+          lastContent: result.lastMessage.content,
+          modelCalls: model.callCount,
+        }).toEqual({ stopReason: 'limitTurns', lastContent: [textReply], modelCalls: 1 })
+        expect(agent.messages[1]).toStrictEqual(result.lastMessage)
+      })
+
+      it('throws without an attempt limit when the forced retry fails', async () => {
+        const agent = new Agent({ model: new MockMessageModel().addTurn(textReply), structuredOutputSchema: schema })
+
+        await expect(agent.invoke('Plan a review', { limits: { turns: 5 } })).rejects.toThrow(
+          new StructuredOutputError(NO_STRUCTURED_OUTPUT_MESSAGE)
+        )
       })
 
       it('counts filtered responses toward the attempt limit', async () => {
-        const model = new MockMessageModel().addTurn(new TextBlock('Plain text instead of structured output'))
+        const model = new MockMessageModel().addTurn(textReply)
         for (let attempt = 0; attempt < 3; attempt++) {
           model.addTurn(new TextBlock('Filtered'), { stopReason: 'contentFiltered' })
         }
-        model.addTurn(outputTurn(valid))
+        model.addTurn(outputCall(valid))
         const agent = new Agent({ model, structuredOutputSchema: schema, printer: false })
 
         const result = await agent.invoke('Plan a review', { limits: { structuredOutputAttempts: 3 } })
 
-        expect(result.stopReason).toBe('limitStructuredOutputAttempts')
-        expect(result.structuredOutput).toBeUndefined()
-        expect(model.callCount).toBe(4)
+        expect({
+          stopReason: result.stopReason,
+          structuredOutput: result.structuredOutput,
+          modelCalls: model.callCount,
+        }).toEqual({ stopReason: 'limitStructuredOutputAttempts', structuredOutput: undefined, modelCalls: 4 })
       })
 
-      it('limits each invocation to three failed attempts', async () => {
+      it('starts each root call with a fresh attempt budget', async () => {
         const model = new MockMessageModel()
-        for (let attempt = 0; attempt < 6; attempt++) model.addTurn(outputTurn({}, `output-${attempt}`))
-        model.addTurn(outputTurn(valid))
+        for (let attempt = 0; attempt < 6; attempt++) model.addTurn(outputCall({}, `output-${attempt}`))
+        model.addTurn(outputCall(valid))
         const agent = new Agent({ model, printer: false })
+        const options = { structuredOutputSchema: schema, limits: { structuredOutputAttempts: 3 } }
 
-        for (const calls of [3, 6]) {
-          const result = await agent.invoke('Plan a review', {
-            structuredOutputSchema: schema,
-            limits: { structuredOutputAttempts: 3 },
-          })
-          expect(result.stopReason).toBe('limitStructuredOutputAttempts')
-          expect(result.structuredOutput).toBeUndefined()
-          expect(model.callCount).toBe(calls)
-          expect(agent.tools.map((entry) => entry.name)).not.toContain('strands_structured_output')
-          expect(agent.messages.at(-1)?.content).toEqual([
-            expect.objectContaining({ type: 'toolResultBlock', status: 'error' }),
-          ])
-        }
+        const first = await agent.invoke('Plan a review', options)
+        const firstCalls = model.callCount
+        const second = await agent.invoke('Plan a review', options)
+
+        expect({
+          stopReasons: [first.stopReason, second.stopReason],
+          modelCalls: [firstCalls, model.callCount],
+          tools: agent.tools.map((entry) => entry.name),
+          lastContent: agent.messages.at(-1)?.content,
+        }).toEqual({
+          stopReasons: ['limitStructuredOutputAttempts', 'limitStructuredOutputAttempts'],
+          modelCalls: [3, 6],
+          tools: [],
+          lastContent: [expect.objectContaining({ type: 'toolResultBlock', status: 'error' })],
+        })
       })
 
-      it('resets structured output attempts on hook resume', async () => {
+      it("continues the attempt budget when passed the previous call's invocation context", async () => {
         const model = new MockMessageModel()
-        for (let attempt = 0; attempt < 6; attempt++) model.addTurn(outputTurn({}, `output-${attempt}`))
+        for (let attempt = 0; attempt < 3; attempt++) model.addTurn(outputCall({}, `output-${attempt}`))
+        const agent = new Agent({ model, structuredOutputSchema: schema, printer: false })
+
+        const first = await agent.invoke('Plan a review', { limits: { structuredOutputAttempts: 2 } })
+        const second = await agent.invoke('Try again', { invocationContext: first.invocationContext! })
+
+        expect({ stopReasons: [first.stopReason, second.stopReason], modelCalls: model.callCount }).toEqual({
+          stopReasons: ['limitStructuredOutputAttempts', 'limitStructuredOutputAttempts'],
+          modelCalls: 2,
+        })
+      })
+
+      it('preserves the attempt budget across a hook resume', async () => {
+        const model = new MockMessageModel()
+        for (let attempt = 0; attempt < 6; attempt++) model.addTurn(outputCall({}, `output-${attempt}`))
         const agent = new Agent({ model, structuredOutputSchema: schema, printer: false })
         let resumeInput: AfterInvocationEvent['resume']
 
@@ -1522,38 +1695,130 @@ describe('Agent', () => {
 
         const result = await agent.invoke('Plan a review', { limits: { structuredOutputAttempts: 3 } })
 
-        expect(result.stopReason).toBe('limitStructuredOutputAttempts')
-        expect(result.structuredOutput).toBeUndefined()
-        expect(model.callCount).toBe(5)
+        expect({
+          stopReason: result.stopReason,
+          structuredOutput: result.structuredOutput,
+          modelCalls: model.callCount,
+        }).toEqual({ stopReason: 'limitStructuredOutputAttempts', structuredOutput: undefined, modelCalls: 3 })
+      })
+
+      it('counts a forced response that calls another tool before an interrupt', async () => {
+        const lookup = createMockTool('lookup', () => 'found')
+        const model = new MockMessageModel()
+          .addTurn(textReply)
+          .addTurn({ type: 'toolUseBlock', name: 'lookup', toolUseId: 'lookup', input: {} })
+          .addTurn(new Error('Unexpected model call'))
+        const agent = new Agent({ model, tools: [lookup], structuredOutputSchema: schema, printer: false })
+        agent.addHook(BeforeToolsEvent, (event) => {
+          event.interrupt({ name: 'approve' })
+        })
+
+        const paused = await agent.invoke('Plan a review', { limits: { structuredOutputAttempts: 1 } })
+        const result = await agent.invoke(
+          paused.interrupts!.map((interrupt) => ({
+            interruptResponse: { interruptId: interrupt.id, response: 'approved' },
+          })),
+          { invocationContext: paused.invocationContext! }
+        )
+
+        expect({ stopReasons: [paused.stopReason, result.stopReason], modelCalls: model.callCount }).toEqual({
+          stopReasons: ['interrupt', 'limitStructuredOutputAttempts'],
+          modelCalls: 2,
+        })
+      })
+
+      it('counts a failed attempt when a hook ends the turn', async () => {
+        const model = new MockMessageModel()
+          .addTurn(outputCall({}, 'invalid'))
+          .addTurn(new Error('Unexpected model call'))
+        const agent = new Agent({ model, structuredOutputSchema: schema, printer: false })
+        agent.addHook(AfterToolsEvent, (event) => {
+          event.endTurn = 'Paused for review'
+        })
+
+        const ended = await agent.invoke('Plan a review', { limits: { structuredOutputAttempts: 1 } })
+        const result = await agent.invoke('Continue', { invocationContext: ended.invocationContext! })
+
+        expect({ stopReasons: [ended.stopReason, result.stopReason], modelCalls: model.callCount }).toEqual({
+          stopReasons: ['endTurn', 'limitStructuredOutputAttempts'],
+          modelCalls: 1,
+        })
+      })
+
+      it('counts a failed attempt on a turn that pauses at a checkpoint', async () => {
+        const model = new MockMessageModel()
+          .addTurn(outputCall())
+          .addTurn(outputCall())
+          .addTurn(new Error('Unexpected model call'))
+        const agent = new Agent({ model, structuredOutputSchema: schema, checkpointing: true, printer: false })
+
+        const afterModel = await agent.invoke('Plan a review', { limits: { structuredOutputAttempts: 1 } })
+        const afterTools = await agent.invoke(
+          { checkpointResume: { checkpoint: afterModel.checkpoint!.toJSON() } },
+          { invocationContext: afterModel.invocationContext! }
+        )
+        const result = await agent.invoke(
+          { checkpointResume: { checkpoint: afterTools.checkpoint!.toJSON() } },
+          { invocationContext: afterTools.invocationContext! }
+        )
+
+        expect({
+          positions: [afterModel.checkpoint?.position, afterTools.checkpoint?.position],
+          stopReason: result.stopReason,
+          modelCalls: model.callCount,
+        }).toEqual({
+          positions: ['afterModel', 'afterTools'],
+          stopReason: 'limitStructuredOutputAttempts',
+          modelCalls: 2,
+        })
+      })
+
+      it.each([
+        { name: 'invalid then valid', blocks: [outputCall({}, 'invalid'), outputCall(valid, 'valid')] },
+        { name: 'valid then invalid', blocks: [outputCall(valid, 'valid'), outputCall({}, 'invalid')] },
+      ])('returns the valid output of a response that also has an invalid call: $name', async ({ blocks }) => {
+        const model = new MockMessageModel().addTurn(blocks).addTurn(new Error('Unexpected model call'))
+        const agent = new Agent({ model, structuredOutputSchema: schema, printer: false })
+
+        const result = await agent.invoke('Plan a review', { limits: { structuredOutputAttempts: 1 } })
+
+        expect({ structuredOutput: result.structuredOutput, modelCalls: model.callCount }).toEqual({
+          structuredOutput: valid,
+          modelCalls: 1,
+        })
       })
 
       it('counts one attempt per model response', async () => {
         const model = new MockMessageModel()
-          .addTurn([outputTurn({}, 'invalid-1'), outputTurn({}, 'invalid-2')])
-          .addTurn(outputTurn(valid))
+          .addTurn([outputCall({}, 'invalid-1'), outputCall({}, 'invalid-2')])
+          .addTurn(outputCall(valid))
         const agent = new Agent({ model, structuredOutputSchema: schema, printer: false })
 
         const result = await agent.invoke('Plan a review', { limits: { structuredOutputAttempts: 2 } })
 
-        expect(result.structuredOutput).toEqual(valid)
-        expect(model.callCount).toBe(2)
+        expect({ structuredOutput: result.structuredOutput, modelCalls: model.callCount }).toEqual({
+          structuredOutput: valid,
+          modelCalls: 2,
+        })
       })
 
       it.each([
         { limits: { turns: 1 }, stopReason: 'limitTurns' },
         { limits: { outputTokens: 1 }, stopReason: 'limitOutputTokens' },
         { limits: { totalTokens: 2 }, stopReason: 'limitTotalTokens' },
-      ])('checks $stopReason before the attempt limit', async ({ limits, stopReason }) => {
+      ])('reports $stopReason before the attempt limit', async ({ limits, stopReason }) => {
         const model = new MockMessageModel()
-          .addTurn(outputTurn(), { usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } })
+          .addTurn(outputCall(), { usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } })
           .addTurn(new Error('Unexpected model call'))
         const agent = new Agent({ model, structuredOutputSchema: schema, printer: false })
 
         const result = await agent.invoke('Plan a review', { limits: { ...limits, structuredOutputAttempts: 1 } })
 
-        expect(result.stopReason).toBe(stopReason)
-        expect(result.structuredOutput).toBeUndefined()
-        expect(model.callCount).toBe(1)
+        expect({
+          stopReason: result.stopReason,
+          structuredOutput: result.structuredOutput,
+          modelCalls: model.callCount,
+        }).toEqual({ stopReason, structuredOutput: undefined, modelCalls: 1 })
       })
 
       it('does not count ordinary tool failures', async () => {
@@ -1562,13 +1827,15 @@ describe('Agent', () => {
         })
         const model = new MockMessageModel()
           .addTurn({ type: 'toolUseBlock', name: 'unavailable', toolUseId: 'service', input: {} })
-          .addTurn(outputTurn(valid))
+          .addTurn(outputCall(valid))
         const agent = new Agent({ model, tools: [unavailable], structuredOutputSchema: schema, printer: false })
 
-        expect(
-          (await agent.invoke('Plan a review', { limits: { structuredOutputAttempts: 1 } })).structuredOutput
-        ).toEqual(valid)
-        expect(model.callCount).toBe(2)
+        const result = await agent.invoke('Plan a review', { limits: { structuredOutputAttempts: 1 } })
+
+        expect({ structuredOutput: result.structuredOutput, modelCalls: model.callCount }).toEqual({
+          structuredOutput: valid,
+          modelCalls: 2,
+        })
       })
     })
 
@@ -1638,19 +1905,57 @@ describe('Agent', () => {
       expect(secondCallRoles[secondCallRoles.length - 1]).toBe('user')
     })
 
-    it.each([{}, { limits: { turns: 5 } }])(
-      'throws without an attempt limit when the forced tool is not called: %j',
-      async (options) => {
-        const schema = z.object({ value: z.number() })
+    it('throws StructuredOutputError when model refuses to use tool after forcing', async () => {
+      const schema = z.object({ value: z.number() })
 
-        // Model returns text twice - once normally, once when forced
-        const model = new MockMessageModel().addTurn({ type: 'textBlock', text: 'Response' })
+      // Model returns text twice - once normally, once when forced
+      const model = new MockMessageModel().addTurn({ type: 'textBlock', text: 'Response' })
 
-        const agent = new Agent({ model, structuredOutputSchema: schema })
+      const agent = new Agent({ model, structuredOutputSchema: schema })
 
-        await expect(agent.invoke('Test', options)).rejects.toThrow(StructuredOutputError)
-      }
-    )
+      await expect(agent.invoke('Test')).rejects.toThrow(new StructuredOutputError(NO_STRUCTURED_OUTPUT_MESSAGE))
+    })
+
+    it('passes the schema on the retry and accepts a JSON text response', async () => {
+      const schema = z.object({ value: z.number() })
+      const model = new MockMessageModel()
+        .addTurn({ type: 'textBlock', text: 'Plain text, no tool call' })
+        .addTurn({ type: 'textBlock', text: '{"value": 42}' })
+      const streamOptions: (StreamOptions | undefined)[] = []
+      const originalStream = model.stream.bind(model)
+      vi.spyOn(model, 'stream').mockImplementation((messages, options) => {
+        streamOptions.push(options)
+        return originalStream(messages, options)
+      })
+
+      const agent = new Agent({ model, tools: [createRandomTool('lookup')], structuredOutputSchema: schema })
+      const result = await agent.invoke('Test')
+
+      expect(result.structuredOutput).toStrictEqual({ value: 42 })
+      expect(result.stopReason).toBe('endTurn')
+      expect(agent.messages.map((message) => message.role)).toStrictEqual(['user', 'assistant'])
+      expect(agent.messages[1]).toStrictEqual(result.lastMessage)
+      expect(streamOptions.map((options) => options?.structuredOutputSchema)).toStrictEqual([undefined, schema])
+      expect(streamOptions.map((options) => options?.toolChoice)).toStrictEqual([
+        undefined,
+        { tool: { name: 'strands_structured_output' } },
+      ])
+      expect(streamOptions[1]?.toolSpecs?.map((spec) => spec.name)).toStrictEqual([
+        'lookup',
+        'strands_structured_output',
+      ])
+    })
+
+    it('throws StructuredOutputError when the JSON text response fails validation', async () => {
+      const schema = z.object({ value: z.number() })
+      const model = new MockMessageModel()
+        .addTurn({ type: 'textBlock', text: 'Plain text, no tool call' })
+        .addTurn({ type: 'textBlock', text: '{"value": "not a number"}' })
+
+      const agent = new Agent({ model, structuredOutputSchema: schema })
+
+      await expect(agent.invoke('Test')).rejects.toThrow(/^Structured output failed validation: /)
+    })
 
     it('throws MaxTokensError when maxTokens reached before structured output', async () => {
       const schema = z.object({ value: z.number() })
@@ -2325,7 +2630,7 @@ describe('normalizeToolUseNames', () => {
     })
 
     describe('when limits.outputTokens is reached', () => {
-      it('returns limitOutputTokens once cumulative outputTokens hits the cap', async () => {
+      it('returns limitOutputTokens once cumulative outputTokens hits the limit', async () => {
         const model = new MockMessageModel()
           .addTurn(...toolUseTurn('tool-1', { inputTokens: 10, outputTokens: 60, totalTokens: 70 }))
           .addTurn(...toolUseTurn('tool-2', { inputTokens: 10, outputTokens: 60, totalTokens: 70 }))
@@ -2351,7 +2656,7 @@ describe('normalizeToolUseNames', () => {
         )
       })
 
-      it('uses at-most (>=) semantics: stops when count exactly equals the cap', async () => {
+      it('uses at-most (>=) semantics: stops when count exactly equals the limit', async () => {
         const model = new MockMessageModel()
           .addTurn(...toolUseTurn('tool-1', { inputTokens: 10, outputTokens: 100, totalTokens: 110 }))
           .addTurn(...toolUseTurn('tool-2', { inputTokens: 10, outputTokens: 100, totalTokens: 110 }))
@@ -2375,7 +2680,7 @@ describe('normalizeToolUseNames', () => {
     })
 
     describe('when limits.totalTokens is reached', () => {
-      it('returns limitTotalTokens once cumulative totalTokens hits the cap', async () => {
+      it('returns limitTotalTokens once cumulative totalTokens hits the limit', async () => {
         const model = new MockMessageModel()
           .addTurn(...toolUseTurn('tool-1', { inputTokens: 200, outputTokens: 100, totalTokens: 300 }))
           .addTurn(...toolUseTurn('tool-2', { inputTokens: 200, outputTokens: 100, totalTokens: 300 }))
@@ -2459,7 +2764,7 @@ describe('normalizeToolUseNames', () => {
         )
       })
 
-      it('falls back to outputTokens when no higher-priority cap is set', async () => {
+      it('falls back to outputTokens when no higher-priority limit is set', async () => {
         const result = await buildAgent().invoke('go', { limits: { outputTokens: 1 } })
 
         expect(result).toEqual(
@@ -2475,7 +2780,7 @@ describe('normalizeToolUseNames', () => {
     describe('when the same agent is reused across invocations', () => {
       it('scopes the limit to the current invocation, not lifetime', async () => {
         // Each turn uses 50 output tokens. With limits.outputTokens: 75, a single
-        // invocation tolerates one turn but trips on the second. If the cap
+        // invocation tolerates one turn but trips on the second. If the limit
         // were lifetime-scoped, the second `invoke()` would trip on its first
         // turn (75 cumulative across both calls).
         const model = new MockMessageModel()
@@ -2507,7 +2812,6 @@ describe('normalizeToolUseNames', () => {
         ['NaN', { limits: { outputTokens: NaN } }],
         ['Infinity', { limits: { totalTokens: Infinity } }],
         ['zero structured output attempts', { limits: { structuredOutputAttempts: 0 } }],
-        ['null structured output attempts', { limits: { structuredOutputAttempts: null as unknown as number } }],
       ])('rejects %s with TypeError', async (_label, options) => {
         const agent = new Agent({ model: new MockMessageModel().addTurn({ type: 'textBlock', text: 'never reached' }) })
         await expect(agent.invoke('go', options)).rejects.toThrow(TypeError)
@@ -2515,11 +2819,11 @@ describe('normalizeToolUseNames', () => {
     })
 
     describe('when a limit key is unrecognized', () => {
-      // Guards #4354: a mistyped cap name is rejected instead of silently applying no limit.
+      // Guards #4354: a mistyped limit name is rejected instead of silently applying no limit.
       it.each([
         ['maxTurns', { limits: { maxTurns: 3 } }],
         ['turn', { limits: { turn: 3 } }],
-        ['a typo alongside a valid cap', { limits: { turns: 3, maxTokens: 100 } }],
+        ['a typo alongside a valid limit', { limits: { turns: 3, maxTokens: 100 } }],
       ])('rejects %s with TypeError', async (_label, options) => {
         const agent = new Agent({ model: new MockMessageModel().addTurn({ type: 'textBlock', text: 'never reached' }) })
         await expect(agent.invoke('go', options as InvokeOptions)).rejects.toThrow(/not recognized/)

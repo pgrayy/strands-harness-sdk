@@ -213,7 +213,7 @@ async def test_unrecognized_limits_keys_raise_type_error(limits):
 
 
 def test_recognized_limits_keys_are_pinned():
-    """A cap added to ``Limits`` must also be enforced in ``event_loop._check_limits``.
+    """A cap added to ``Limits`` must also be enforced in ``invocation_context._reached_own_limit``.
 
     ``_LIMITS_KEYS`` is derived from ``Limits``, so a new cap begins passing validation with
     no change here, while enforcement reads each cap by name and would silently ignore it.

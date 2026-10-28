@@ -8,6 +8,7 @@ import json
 import logging
 import mimetypes
 import secrets
+from collections import Counter
 from collections.abc import AsyncGenerator
 from typing import Any, TypeVar, cast
 
@@ -21,7 +22,7 @@ from ..types.exceptions import ContextWindowOverflowException, ModelThrottledExc
 from ..types.streaming import StreamEvent
 from ..types.tools import ToolChoice, ToolChoiceToolDict, ToolSpec
 from ._defaults import resolve_config_metadata
-from ._validation import _has_location_source, validate_config_keys
+from ._validation import _has_location_source, _log_skipped_blocks, validate_config_keys
 from .model import BaseModelConfig, Model
 
 logger = logging.getLogger(__name__)
@@ -263,15 +264,16 @@ class GeminiModel(Model):
         tool_use_id_to_name: dict[str, str] = {}
 
         contents = []
+        skipped: Counter[str] = Counter()
         for message in messages:
             parts = []
             for content in message["content"]:
                 # Check for location sources and skip with warning
                 if _has_location_source(content):
-                    logger.warning("Location sources are not supported by Gemini | skipping content block")
+                    skipped["Location sources are not supported by Gemini | skipping content block"] += 1
                     continue
                 if "cachePoint" in content:
-                    logger.warning("cachePoint content block is not supported by Gemini | skipping")
+                    skipped["cachePoint content block is not supported by Gemini | skipping"] += 1
                     continue
                 parts.append(self._format_request_content_part(content, tool_use_id_to_name))
 
@@ -282,6 +284,7 @@ class GeminiModel(Model):
                 )
             )
 
+        _log_skipped_blocks(logger, skipped)
         return contents
 
     def _format_request_tools(self, tool_specs: list[ToolSpec] | None) -> list[genai.types.Tool | Any] | None:
@@ -375,6 +378,14 @@ class GeminiModel(Model):
             # config expresses more than a ToolChoice can, so the explicit one is left whole rather than
             # merged with, or replaced by, the narrower per-request choice.
             config_params.setdefault("tool_config", tool_config)
+
+        # Enable flag to mix function declarations with built-in tools (not supported in Vertex AI).
+        needs_server_side_flag = tool_specs and self.config.get("gemini_tools") and not self._get_client().vertexai
+        if needs_server_side_flag:
+            tc = config_params.get("tool_config")
+            as_dict = tc.to_json_dict() if isinstance(tc, genai.types.ToolConfig) else dict(tc or {})
+            as_dict.setdefault("include_server_side_tool_invocations", True)
+            config_params["tool_config"] = as_dict
 
         return genai.types.GenerateContentConfig(
             system_instruction=system_prompt,
