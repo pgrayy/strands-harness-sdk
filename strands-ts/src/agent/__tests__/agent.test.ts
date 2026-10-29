@@ -11,6 +11,7 @@ import { ConcurrentInvocationError } from '../../errors.js'
 import {
   MaxTokensError,
   TextBlock,
+  JsonBlock,
   CachePointBlock,
   Message,
   ToolUseBlock,
@@ -1788,6 +1789,25 @@ describe('Agent', () => {
         })
       })
 
+      it('does not count valid output that history offloading rewrites', async () => {
+        const largeValid = { steps: ['Review the change thoroughly before merging. '.repeat(400)] }
+        const model = new MockMessageModel()
+          .addTurn(outputCall(largeValid, 'large'))
+          .addTurn(outputCall(valid, 'small'))
+        const agent = new Agent({ model, structuredOutputSchema: schema, contextManager: 'auto', printer: false })
+
+        const first = await agent.invoke('Plan a review', { limits: { structuredOutputAttempts: 1 } })
+        const second = await agent.invoke('Plan another', { invocationContext: first.invocationContext! })
+
+        expect({
+          outputs: [first.structuredOutput, second.structuredOutput],
+          offloaded: agent.messages[2]?.content,
+        }).toEqual({
+          outputs: [largeValid, valid],
+          offloaded: [expect.objectContaining({ status: 'success', content: [expect.any(TextBlock)] })],
+        })
+      })
+
       it('counts one attempt per model response', async () => {
         const model = new MockMessageModel()
           .addTurn([outputCall({}, 'invalid-1'), outputCall({}, 'invalid-2')])
@@ -1837,6 +1857,75 @@ describe('Agent', () => {
           modelCalls: 2,
         })
       })
+    })
+
+    const longAnswer = 'Rust has a steep learning curve but produces fast single binaries. '.repeat(120)
+
+    it.each([
+      { mode: 'disabled', contextManager: false, answer: longAnswer, offloaded: false },
+      { mode: 'auto with short output', contextManager: 'auto', answer: 'Short answer.', offloaded: false },
+      { mode: 'auto with large output', contextManager: 'auto', answer: longAnswer, offloaded: true },
+      { mode: 'agentic below threshold', contextManager: 'agentic', answer: longAnswer, offloaded: false },
+      { mode: 'agentic above threshold', contextManager: 'agentic', answer: longAnswer.repeat(5), offloaded: true },
+    ] as const)('preserves validated structured output with $mode', async ({ contextManager, answer, offloaded }) => {
+      // Context management may rewrite history, but must preserve the returned output (#5207).
+      const schema = z.object({ message: z.string().trim() })
+      const expected = { message: answer.trim() }
+      const model = new MockMessageModel()
+        .addTurn({
+          type: 'toolUseBlock',
+          name: 'strands_structured_output',
+          toolUseId: 'tool-1',
+          input: { message: answer },
+        })
+        .addTurn({
+          type: 'toolUseBlock',
+          name: 'strands_structured_output',
+          toolUseId: 'tool-2',
+          input: { message: 'Short fallback answer.' },
+        })
+      const agent = new Agent({ model, contextManager, printer: false })
+
+      const result = await agent.invoke('Test', { structuredOutputSchema: schema })
+
+      expect(result.structuredOutput).toEqual(expected)
+      expect(model.callCount).toBe(1)
+      expect(agent.messages[2]?.content).toEqual([
+        new ToolResultBlock({
+          toolUseId: 'tool-1',
+          status: 'success',
+          content: [offloaded ? expect.any(TextBlock) : new JsonBlock({ json: expected })],
+        }),
+      ])
+    })
+
+    it('continues offloading ordinary tool results', async () => {
+      const model = new MockMessageModel()
+        .addTurn({ type: 'toolUseBlock', name: 'large_result', toolUseId: 'tool-1', input: {} })
+        .addTurn({ type: 'textBlock', text: 'Done' })
+      const largeResult = createMockTool(
+        'large_result',
+        () =>
+          new ToolResultBlock({
+            toolUseId: 'tool-1',
+            status: 'success',
+            content: [new JsonBlock({ json: { message: longAnswer } })],
+          })
+      )
+      const agent = new Agent({ model, tools: [largeResult], contextManager: 'auto', printer: false })
+
+      const result = await agent.invoke('Test')
+
+      expect(result.structuredOutput).toBeUndefined()
+      expect(result.lastMessage.content).toEqual([new TextBlock('Done')])
+      expect(model.callCount).toBe(2)
+      expect(agent.messages[2]?.content).toEqual([
+        new ToolResultBlock({
+          toolUseId: 'tool-1',
+          status: 'success',
+          content: [new TextBlock(expect.stringContaining('[Truncated:'))],
+        }),
+      ])
     })
 
     it('returns structured output when schema provided and tool used', async () => {
@@ -1988,11 +2077,15 @@ describe('Agent', () => {
         })
         .addTurn({ type: 'textBlock', text: 'Done' })
 
-      const agent = new Agent({ model, structuredOutputSchema: schema })
+      const agent = new Agent({ model, structuredOutputSchema: schema, contextManager: 'auto' })
 
       const result = await agent.invoke('Test')
 
       expect(result.structuredOutput).toEqual({ name: 'John', age: 30 })
+      expect(model.callCount).toBe(2)
+      expect(agent.messages[2]?.content).toEqual([
+        expect.objectContaining({ type: 'toolResultBlock', toolUseId: 'tool-1', status: 'error' }),
+      ])
     })
 
     it('works without structured output schema', async () => {
@@ -2110,7 +2203,7 @@ describe('Agent', () => {
       expect(second.structuredOutput).toEqual({ name: 'Bob' })
     })
 
-    it('skips structured output extraction when AfterToolsEvent.endTurn halts the loop', async () => {
+    it('honors AfterToolsEvent.endTurn over structured output', async () => {
       const schema = z.object({ name: z.string() })
 
       const model = new MockMessageModel()
@@ -2118,11 +2211,11 @@ describe('Agent', () => {
           type: 'toolUseBlock',
           name: 'strands_structured_output',
           toolUseId: 'tool-1',
-          input: { name: 'John' },
+          input: { name: longAnswer },
         })
         .addTurn({ type: 'textBlock', text: 'Done' })
 
-      const agent = new Agent({ model, structuredOutputSchema: schema })
+      const agent = new Agent({ model, structuredOutputSchema: schema, contextManager: 'auto' })
       agent.addHook(AfterToolsEvent, (event: AfterToolsEvent) => {
         event.endTurn = true
       })

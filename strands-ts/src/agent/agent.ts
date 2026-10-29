@@ -1546,6 +1546,7 @@ export class Agent implements LocalAgent, InvokableAgent {
    *
    * @param snapshot - The snapshot to restore from
    * @throws Error if `snapshot.schemaVersion` is incompatible or scope is wrong
+   * @throws SessionError if the snapshot's activated interrupt state carries a malformed pending tool execution
    *
    * @example
    * ```typescript
@@ -1856,6 +1857,11 @@ export class Agent implements LocalAgent, InvokableAgent {
             continue
           }
 
+          // Message-added hooks may offload the JSON block needed for structured output.
+          const structuredOutput = structuredOutputTool
+            ? this._extractStructuredOutput(assistantMessage, toolResultMessage)
+            : undefined
+
           /**
            * Deferred append: both messages are added AFTER tool execution completes.
            * This keeps agent.messages in a valid, reinvokable state at all times.
@@ -1878,7 +1884,7 @@ export class Agent implements LocalAgent, InvokableAgent {
 
           this._recordStructuredOutputToolFailure(
             assistantMessage,
-            toolResultMessage,
+            structuredOutput,
             structuredOutputTool,
             invocationContext
           )
@@ -1909,9 +1915,6 @@ export class Agent implements LocalAgent, InvokableAgent {
           }
 
           // Structured output captured: exit
-          const structuredOutput = structuredOutputTool
-            ? this._extractStructuredOutput(assistantMessage, toolResultMessage)
-            : undefined
           if (structuredOutput !== undefined) {
             result = new AgentResult({
               invocationContext,
@@ -1976,6 +1979,8 @@ export class Agent implements LocalAgent, InvokableAgent {
         for (const interrupt of error.interrupts) {
           this._interruptState.registerInterrupt(interrupt)
         }
+        // Activate before yielding so a consumer that stops at an InterruptEvent can still resume.
+        this._interruptState.activate()
         // Fan out one event per interrupt. Each event exposes `interrupt.source` so
         // consumers can filter by origin (tool callback vs hook callback) without
         // subscribing to separate event types.
@@ -2092,23 +2097,21 @@ export class Agent implements LocalAgent, InvokableAgent {
 
   /**
    * Counts a failed structured output attempt for a tool turn whose structured output tool calls all failed.
-   * Reads every result of the turn, including results completed before an interrupt.
    *
    * @param toolUseMessage - The assistant message whose tool calls ran
-   * @param toolResultMessage - The message containing the turn's tool results
+   * @param structuredOutput - The structured output extracted from every result of the turn, including results
+   *   completed before an interrupt, if any
    * @param structuredOutputTool - The structured output tool, if a schema is set
    * @param invocationContext - The state of the request the turn ran in
    */
   private _recordStructuredOutputToolFailure(
     toolUseMessage: Message,
-    toolResultMessage: Message,
+    structuredOutput: unknown,
     structuredOutputTool: StructuredOutputTool | undefined,
     invocationContext: InvocationContextImpl
   ): void {
-    if (!structuredOutputTool || structuredOutputToolUseIds(toolUseMessage).size === 0) return
-    if (this._extractStructuredOutput(toolUseMessage, toolResultMessage) === undefined) {
-      invocationContext.recordStructuredOutputFailure()
-    }
+    if (!structuredOutputTool || structuredOutput !== undefined) return
+    if (structuredOutputToolUseIds(toolUseMessage).size > 0) invocationContext.recordStructuredOutputFailure()
   }
 
   /**
@@ -2141,7 +2144,6 @@ export class Agent implements LocalAgent, InvokableAgent {
     invocationState: InvocationState,
     invocationContext: InvocationContextImpl
   ): AgentResult {
-    this._interruptState.activate()
     return new AgentResult({
       invocationContext,
       stopReason: 'interrupt',
